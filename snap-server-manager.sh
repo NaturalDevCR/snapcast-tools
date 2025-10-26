@@ -172,6 +172,86 @@ confirm_actions(){
 # ────────────────────────────────────────────────────────────────────────────
 # Instalación segura Snapserver desde release .deb
 # ────────────────────────────────────────────────────────────────────────────
+fix_snapserver_datadir(){
+  local SERVICE_FILE="/usr/lib/systemd/system/snapserver.service"
+
+  # Verifica que el archivo exista
+  [ -f "$SERVICE_FILE" ] || return 0
+
+  # Verifica si realmente contiene ${HOME} (solo en versiones nuevas problemáticas)
+  if grep -q '\--server\.datadir=\${HOME}' "$SERVICE_FILE"; then
+    echo "🩹 Corrigiendo ruta de datadir en snapserver.service (removiendo \$HOME)…"
+
+    # Reemplazar SOLO esa parte
+    sed -i 's|--server.datadir=${HOME}|--server.datadir=/var/lib/snapserver|g' "$SERVICE_FILE"
+
+    # Asegurar directorio
+    mkdir -p /var/lib/snapserver
+    chown "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
+
+    systemctl daemon-reload
+    systemctl restart snapserver || true
+
+    echo "✅ Snapserver ahora usa /var/lib/snapserver como datadir."
+  else
+    echo "✅ snapserver.service ya utiliza un datadir válido. No se realizaron cambios."
+  fi
+}
+
+monitor_snapserver(){
+  echo ""
+  echo "🔎 Verificando estado de Snapserver..."
+
+  # Si el servicio no existe, no hacemos nada
+  if ! systemctl list-unit-files | grep -q snapserver.service; then
+    echo "❌ snapserver.service no está instalado."
+    return
+  fi
+
+  local status
+  status="$(systemctl is-active snapserver 2>/dev/null || echo unknown)"
+
+  case "$status" in
+    active)
+      echo "🟢 Snapserver está activo."
+      ;;
+
+    activating|reloading|starting)
+      echo "🔄 Snapserver se está iniciando..."
+      ;;
+
+    failed|inactive)
+      echo "🚨 Snapserver está detenido o fallando."
+
+      # Detectar bug del datadir ($HOME)
+      if grep -q '\--server\.datadir=\${HOME}' /usr/lib/systemd/system/snapserver.service 2>/dev/null; then
+        echo "⚠️ Bug detectado: Snapserver está usando --server.datadir=\${HOME}"
+        echo "   Aplicando corrección automática..."
+        fix_snapserver_datadir
+        echo "🔁 Reintentando inicio..."
+        systemctl restart snapserver || true
+        sleep 1
+        if systemctl is-active snapserver &>/dev/null; then
+          echo "✅ Snapserver recuperado automáticamente."
+        else
+          echo "❌ Snapserver sigue fallando. Revisa logs con:"
+          echo "   journalctl -u snapserver -n 50 --no-pager"
+        fi
+      else
+        echo "ℹ️ No se detectó problema de datadir. Consulta logs:"
+        echo "   journalctl -u snapserver -n 50 --no-pager"
+      fi
+      ;;
+
+    *)
+      echo "❓ Estado desconocido: $status"
+      ;;
+  esac
+
+  echo ""
+  pause
+}
+
 install_prereqs(){
   echo "🔍 Verificando/instalando prerequisitos…"
   apt-get update -y
@@ -228,6 +308,8 @@ install_prereqs(){
   systemctl enable snapserver
   systemctl restart snapserver
   echo "✅ Snapserver instalado y activo."
+  # Arreglar datadir si usa ${HOME}
+  fix_snapserver_datadir
 }
 
 ensure_prereqs(){
@@ -421,6 +503,9 @@ main_menu(){
   if [[ "$LXC_MODE" -eq 1 ]]; then
     lxc_instructions
   fi
+
+  # NUEVO: verificación automática del servidor al arrancar el menú
+  monitor_snapserver
 
   while true; do
     clear
