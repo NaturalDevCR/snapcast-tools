@@ -21,9 +21,73 @@ ts(){ date +"%Y-%m-%d_%H-%M-%S"; }
 ensure_cmd(){ command -v "$1" >/dev/null 2>&1 || { echo "❌ Requiere '$1'."; exit 1; }; }
 escape_sed(){ sed -e 's/[\/&]/\\&/g' <<<"$1"; }
 
+install_prereqs(){
+  echo "🔍 Verificando dependencias..."
+
+  # Paquetes esenciales
+  apt-get update -y
+  apt-get install -y alsa-utils git build-essential cmake pkg-config \
+    libasound2-dev libavahi-client-dev libvorbis-dev libopus-dev \
+    libsoxr-dev libflac-dev libogg-dev libsamplerate-dev libopusfile-dev \
+    libconfig++-dev libavformat-dev libavcodec-dev libavutil-dev \
+    libavfilter-dev libswresample-dev
+
+  # FFmpeg
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "📦 Instalando FFmpeg..."
+    apt-get install -y ffmpeg
+  fi
+
+  # Usuario snapserver
+  if ! getent passwd snapserver >/dev/null; then
+    echo "👤 Creando usuario snapserver..."
+    useradd -r -s /usr/sbin/nologin snapserver
+  fi
+
+  # Snapserver
+  if ! command -v snapserver >/dev/null 2>&1; then
+    echo "⬇️ Descargando Snapcast desde GitHub..."
+    cd /tmp
+    git clone https://github.com/badaix/snapcast.git
+    cd snapcast
+    mkdir -p build && cd build
+    cmake ..
+    make -j"$(nproc)"
+    make install
+    ldconfig
+
+    # Crear servicio systemd si no existe
+    if [ ! -f /etc/systemd/system/snapserver.service ]; then
+      cat > /etc/systemd/system/snapserver.service <<EOF
+[Unit]
+Description=Snapcast Server
+After=network.target
+
+[Service]
+ExecStart=/usr/local/bin/snapserver --config /etc/snapserver.conf
+User=snapserver
+Restart=always
+
+[Install]
+WantedBy=multi-user.target
+EOF
+    fi
+
+    mkdir -p /var/lib/snapserver
+    chown snapserver:snapserver /var/lib/snapserver
+
+    systemctl daemon-reload
+    systemctl enable snapserver
+    systemctl restart snapserver
+
+    echo "✅ Snapserver instalado y ejecutándose."
+  else
+    echo "✅ Snapserver ya está instalado."
+  fi
+}
+
 ensure_prereqs(){
-  ensure_cmd ffmpeg
-  getent passwd "$SNAP_USER" >/dev/null || { echo "❌ Usuario '$SNAP_USER' no existe."; exit 1; }
+  install_prereqs
   mkdir -p "$SNAP_FIFO_DIR" "$BACKUP_DIR"
   chown -R "$SNAP_USER:$SNAP_GROUP" "$SNAP_FIFO_DIR"
   [ -f "$CONF_FILE" ] || echo "[stream]" > "$CONF_FILE"
