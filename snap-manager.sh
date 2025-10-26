@@ -21,72 +21,137 @@ ts(){ date +"%Y-%m-%d_%H-%M-%S"; }
 ensure_cmd(){ command -v "$1" >/dev/null 2>&1 || { echo "❌ Requiere '$1'."; exit 1; }; }
 escape_sed(){ sed -e 's/[\/&]/\\&/g' <<<"$1"; }
 
+confirm_actions(){
+  echo ""
+  echo "════════════════════════════════════════════════════"
+  echo "🧩 RESUMEN DE ACCIONES A REALIZAR"
+  echo "════════════════════════════════════════════════════"
+  echo ""
+
+  local todo=()
+
+  # ffmpeg
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    todo+=("📦 Instalar FFmpeg")
+  else
+    todo+=("✅ FFmpeg ya instalado")
+  fi
+
+  # alsa-utils
+  if ! dpkg -l | grep -q '^ii.*alsa-utils'; then
+    todo+=("📦 Instalar ALSA (alsa-utils)")
+  else
+    todo+=("✅ ALSA ya instalado")
+  fi
+
+  # snapserver
+  if ! command -v snapserver >/dev/null 2>&1; then
+    todo+=("⬇️ Descargar e instalar Snapserver (.deb oficial desde GitHub)")
+  else
+    todo+=("✅ Snapserver ya instalado (no se reinstala)")
+  fi
+
+  # usuario snapserver
+  if ! id -u snapserver >/dev/null 2>&1; then
+    todo+=("👤 Crear usuario 'snapserver'")
+  else
+    todo+=("✅ Usuario snapserver ya existe")
+  fi
+
+  echo "Acciones:"
+  printf '  - %s\n' "${todo[@]}"
+  echo ""
+
+  echo "════════════════════════════════════════════════════"
+  read -rp "¿Deseas continuar? (y/N): " ans
+  case "$ans" in
+    [Yy]*) echo "✅ Continuando...";;
+    *) echo "❌ Cancelado por el usuario."; exit 0;;
+  esac
+  echo ""
+}
+
+
 install_prereqs(){
   echo "🔍 Verificando dependencias..."
 
-  # Paquetes esenciales
   apt-get update -y
-  apt-get install -y alsa-utils git build-essential cmake pkg-config \
-    libasound2-dev libavahi-client-dev libvorbis-dev libopus-dev \
-    libsoxr-dev libflac-dev libogg-dev libsamplerate-dev libopusfile-dev \
-    libconfig++-dev libavformat-dev libavcodec-dev libavutil-dev \
-    libavfilter-dev libswresample-dev
+  apt-get install -y alsa-utils ffmpeg curl jq
 
-  # FFmpeg
-  if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "📦 Instalando FFmpeg..."
-    apt-get install -y ffmpeg
-  fi
-
-  # Usuario snapserver
-  if ! getent passwd snapserver >/dev/null; then
+  # Crear usuario snapserver si no existe
+  if ! id -u snapserver >/dev/null 2>&1; then
     echo "👤 Creando usuario snapserver..."
     useradd -r -s /usr/sbin/nologin snapserver
   fi
 
-  # Snapserver
-  if ! command -v snapserver >/dev/null 2>&1; then
-    echo "⬇️ Descargando Snapcast desde GitHub..."
-    cd /tmp
-    git clone https://github.com/badaix/snapcast.git
-    cd snapcast
-    mkdir -p build && cd build
-    cmake ..
-    make -j"$(nproc)"
-    make install
-    ldconfig
+  # Detectar arquitectura
+  ARCH="$(dpkg --print-architecture)"
+  echo "🏗 Arquitectura detectada: $ARCH"
 
-    # Crear servicio systemd si no existe
-    if [ ! -f /etc/systemd/system/snapserver.service ]; then
-      cat > /etc/systemd/system/snapserver.service <<EOF
+  # Detectar OS codename
+  CODENAME="$(grep VERSION_CODENAME= /etc/os-release | cut -d= -f2)"
+  echo "🧭 OS: $CODENAME"
+
+  # Obtener última release desde GitHub
+  echo "⬇️ Buscando última versión de Snapcast..."
+  RELEASE_API="https://api.github.com/repos/badaix/snapcast/releases/latest"
+  SNAPVER=$(curl -s "$RELEASE_API" | jq -r .tag_name)
+
+  if [ -z "$SNAPVER" ] || [ "$SNAPVER" = "null" ]; then
+    echo "❌ No se pudo obtener la versión desde GitHub."
+    exit 1
+  fi
+
+  echo "📌 Última versión: $SNAPVER"
+
+  # Buscar el .deb correcto
+  PACKAGE_URL=$(curl -s "$RELEASE_API" | jq -r ".assets[] | select(.name | test(\"snapserver_.*_${ARCH}.*deb\")) | .browser_download_url")
+
+  if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
+    echo "❌ No hay .deb para arquitectura $ARCH en $SNAPVER"
+    exit 1
+  fi
+
+  echo "📦 Paquete encontrado:"
+  echo "   $PACKAGE_URL"
+
+  cd /tmp
+  curl -LO "$PACKAGE_URL"
+
+  echo "📦 Instalando paquete .deb..."
+  dpkg -i snapserver_*_"$ARCH".deb || apt-get -f install -y
+
+  # Crear directorios si no existen
+  mkdir -p /var/lib/snapserver /etc/snapserver.d/backups /var/lib/snapserver/fifo
+  chown -R snapserver:snapserver /var/lib/snapserver
+
+  # Crear servicio systemd si viene faltante (según release)
+  if ! systemctl list-unit-files | grep -q snapserver.service; then
+    cat > /etc/systemd/system/snapserver.service <<EOF
 [Unit]
 Description=Snapcast Server
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/snapserver --config /etc/snapserver.conf
+ExecStart=/usr/bin/snapserver --config /etc/snapserver.conf
 User=snapserver
 Restart=always
 
 [Install]
 WantedBy=multi-user.target
 EOF
-    fi
-
-    mkdir -p /var/lib/snapserver
-    chown snapserver:snapserver /var/lib/snapserver
-
-    systemctl daemon-reload
-    systemctl enable snapserver
-    systemctl restart snapserver
-
-    echo "✅ Snapserver instalado y ejecutándose."
-  else
-    echo "✅ Snapserver ya está instalado."
   fi
+
+  systemctl daemon-reload
+  systemctl enable snapserver
+  systemctl restart snapserver
+
+  echo "✅ Snapserver instalado y en ejecución."
 }
 
+
 ensure_prereqs(){
+  confirm_actions
   install_prereqs
   mkdir -p "$SNAP_FIFO_DIR" "$BACKUP_DIR"
   chown -R "$SNAP_USER:$SNAP_GROUP" "$SNAP_FIFO_DIR"
