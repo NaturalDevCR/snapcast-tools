@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.31
+# SNAPSTREAM MANAGER v2025.10.32
 # Gestión avanzada de Snapserver + FFmpeg + Streams + LXC-aware
 # Instalación segura desde releases .deb oficiales (sin compilar), SHA256 y rollback.
 # Autor: Josue / GPT-5 — No bullshit edition.
@@ -116,6 +116,15 @@ lxc_instructions(){
 # ────────────────────────────────────────────────────────────────────────────
 # Resumen previo y aprobación del usuario
 # ────────────────────────────────────────────────────────────────────────────
+needs_install(){
+  # Retorna 0 si HAY que instalar algo
+  # Retorna 1 si TODO ya está listo
+  if ! command -v ffmpeg >/dev/null 2>&1; then return 0; fi
+  if ! command -v snapserver >/dev/null 2>&1; then return 0; fi
+  if ! id -u "$SNAP_USER" >/dev/null 2>&1; then return 0; fi
+  return 1
+}
+
 confirm_actions(){
   local ARCH CODENAME SNAPVER
   ARCH="$(dpkg --print-architecture)"
@@ -222,8 +231,15 @@ install_prereqs(){
 }
 
 ensure_prereqs(){
-  confirm_actions
-  install_prereqs
+  if needs_install; then
+    # Se requiere instalar algo → mostrar resumen + instalar
+    confirm_actions
+    install_prereqs
+  else
+    # Todo listo → saltar directo
+    echo "✅ Dependencias ya satisfechas. Saltando instalación."
+    sleep 1
+  fi
 }
 
 # ────────────────────────────────────────────────────────────────────────────
