@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.32
+# SNAPSTREAM MANAGER v2025.10.33
 # Gestión avanzada de Snapserver + FFmpeg + Streams + LXC-aware
 # Instalación segura desde releases .deb oficiales (sin compilar), SHA256 y rollback.
 # Autor: Josue / GPT-5 — No bullshit edition.
