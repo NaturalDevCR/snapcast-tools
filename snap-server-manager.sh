@@ -1,9 +1,9 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.34
-# Gestión avanzada de Snapserver + FFmpeg + Streams + LXC-aware
-# Instalación segura desde releases .deb oficiales (sin compilar), SHA256 y rollback.
-# Autor: Josue / GPT-5 — No bullshit edition.
+# SNAPSTREAM MANAGER v2025.10.40
+# Snapserver + FFmpeg Streams + Snapweb + JSON-RPC clients + Backups + LXC-aware
+# Instalación desde .deb oficial (GitHub), fix datadir/configdir, watchdog y utilidades.
+# Autor: Josue / GPT-5 — “No bullshit” build.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -15,49 +15,41 @@ BACKUP_DIR="/etc/snapserver.d/backups"
 CACHE_DIR="/var/cache/snapstream"
 SNAP_USER="snapserver"
 SNAP_GROUP="snapserver"
+DEFAULT_GROUP="Default"         # <- Elegiste “Default”
+SNAP_RPC="http://127.0.0.1:1780/jsonrpc"
 
 mkdir -p "$BACKUP_DIR" "$CACHE_DIR"
 
-# ────────────────────────────────────────────────────────────────────────────
-# Utilidades base / rollback
-# ────────────────────────────────────────────────────────────────────────────
 pause(){ read -rp "Presiona Enter para continuar..."; }
 ts(){ date +"%Y-%m-%d_%H-%M-%S"; }
 escape_sed(){ sed -e 's/[\/&]/\\&/g' <<<"$1"; }
 
 rollback(){
   echo "⚠️  ERROR: ejecutando ROLLBACK…"
-
   if systemctl list-unit-files | grep -q snapserver.service; then
     systemctl stop snapserver 2>/dev/null || true
   fi
-
   if [ -f "$BACKUP_DIR/snapserver_prev.deb" ]; then
     echo "↩️  Restaurando paquete previo…"
     dpkg -i "$BACKUP_DIR/snapserver_prev.deb" || true
   else
     echo "ℹ️  No había snapserver previo. Nada que restaurar."
   fi
-
   if [ -f "$BACKUP_DIR/snapserver.conf.prev" ]; then
     echo "↩️  Restaurando configuración previa…"
     cp -f "$BACKUP_DIR/snapserver.conf.prev" "$CONF_FILE"
   fi
-
   systemctl daemon-reload || true
-
   if systemctl list-unit-files | grep -q snapserver.service; then
     systemctl restart snapserver || true
   fi
-
   echo "✅ Rollback completado."
   exit 1
 }
-
 trap rollback ERR
 
 # ────────────────────────────────────────────────────────────────────────────
-# LXC detection & guidance
+# LXC: explicación opcional (no fuerza /dev/snd)
 # ────────────────────────────────────────────────────────────────────────────
 detect_lxc(){
   if grep -qa container=lxc /proc/1/environ 2>/dev/null; then
@@ -66,59 +58,36 @@ detect_lxc(){
     LXC_MODE=0
   fi
 }
-
 lxc_instructions(){
   echo ""
   echo "─────────────────────────────────────────────"
   echo "   🧠 EJECUCIÓN EN CONTENEDOR LXC DETECTADA"
   echo "─────────────────────────────────────────────"
-  echo "Snapserver en LXC puede funcionar de dos maneras:"
-  echo ""
-  echo " 1) 🟢 Solo orquestación (modo típico)"
-  echo "    - No reproduce audio aquí"
-  echo "    - No captura audio aquí"
-  echo "    - Los clientes reproducen"
-  echo "    → NO requiere /dev/snd ni configuraciones adicionales."
-  echo ""
-  echo " 2) 🎤 Captura de audio local (ej: mixer / mic / tarjeta USB)"
-  echo "    - FFmpeg usará ALSA dentro del CT"
-  echo "    → Sí requiere /dev/snd y permisos de cgroup."
-  echo ""
+  echo "Snapserver puede correr en dos modos:"
+  echo " 1) 🟢 Solo orquestación (típico) → NO requiere /dev/snd"
+  echo " 2) 🎤 Captura local (ALSA en el CT) → requiere /dev/snd"
   echo "─────────────────────────────────────────────"
   read -rp "¿Vas a capturar audio desde hardware local en este contenedor? (y/N): " use_hw
   echo ""
   if [[ "$use_hw" =~ ^[Yy]$ ]]; then
-    echo "⚙️ Se requiere habilitar /dev/snd en el host Proxmox."
-    echo ""
-    echo "Ejecuta en el HOST (Proxmox), reemplazando <ID>:"
-    echo ""
+    echo "⚙️ Habilita /dev/snd en el host Proxmox (reemplaza <ID>):"
     echo "  pct stop <ID>"
     echo "  echo \"lxc.cgroup2.devices.allow = c 116:* rwm\" >> /etc/pve/lxc/<ID>.conf"
     echo "  echo \"lxc.mount.entry = /dev/snd dev/snd none bind,optional,create=dir\" >> /etc/pve/lxc/<ID>.conf"
     echo "  pct start <ID>"
-    echo ""
-    echo "Si el CT es no privilegiado:"
-    echo "  pct set <ID> -features nesting=1,mount=1"
-    echo ""
-    echo "Después dentro del contenedor:"
-    echo "  systemctl restart snapserver"
-    echo ""
-    pause
+    echo "Si el CT es no privilegiado: pct set <ID> -features nesting=1,mount=1"
+    echo "Después dentro del contenedor: systemctl restart snapserver"
   else
-    echo "🟢 Perfecto. Modo servidor puro."
-    echo "   No se configurará /dev/snd porque no se necesita."
-    echo ""
-    pause
+    echo "🟢 Queda en modo servidor puro. Sin /dev/snd."
   fi
+  echo ""
+  pause
 }
 
-
 # ────────────────────────────────────────────────────────────────────────────
-# Resumen previo y aprobación del usuario
+# Pre-check de instalación
 # ────────────────────────────────────────────────────────────────────────────
 needs_install(){
-  # Retorna 0 si HAY que instalar algo
-  # Retorna 1 si TODO ya está listo
   if ! command -v ffmpeg >/dev/null 2>&1; then return 0; fi
   if ! command -v snapserver >/dev/null 2>&1; then return 0; fi
   if ! id -u "$SNAP_USER" >/dev/null 2>&1; then return 0; fi
@@ -137,31 +106,14 @@ confirm_actions(){
   echo "🧠 Sistema detectado:"
   echo "  • OS: $CODENAME"
   echo "  • Arquitectura: $ARCH"
-
-  RELEASE_API="https://api.github.com/repos/badaix/snapcast/releases/latest"
+  local RELEASE_API="https://api.github.com/repos/badaix/snapcast/releases/latest"
   SNAPVER="$(curl -s --max-time 10 "$RELEASE_API" | jq -r '.tag_name // empty' || true)"
   [ -n "$SNAPVER" ] && echo "  • Última versión Snapcast en GitHub: $SNAPVER"
-
   echo ""
   echo "Acciones:"
-  if ! command -v ffmpeg >/dev/null 2>&1; then
-    echo "  - 📦 Instalar FFmpeg"
-  else
-    echo "  - ✅ FFmpeg ya instalado"
-  fi
-
-  if ! command -v snapserver >/dev/null 2>&1; then
-    echo "  - ⬇️ Instalar Snapserver (.deb oficial desde GitHub)"
-  else
-    echo "  - ✅ Snapserver ya instalado"
-  fi
-
-  if ! id -u "$SNAP_USER" >/dev/null 2>&1; then
-    echo "  - 👤 Crear usuario '${SNAP_USER}'"
-  else
-    echo "  - ✅ Usuario '${SNAP_USER}' ya existe"
-  fi
-
+  if ! command -v ffmpeg >/dev/null 2>&1; then echo "  - 📦 Instalar FFmpeg"; else echo "  - ✅ FFmpeg ya instalado"; fi
+  if ! command -v snapserver >/dev/null 2>&1; then echo "  - ⬇️ Instalar Snapserver (.deb oficial desde GitHub)"; else echo "  - ✅ Snapserver ya instalado"; fi
+  if ! id -u "$SNAP_USER" >/dev/null 2>&1; then echo "  - 👤 Crear usuario '${SNAP_USER}'"; else echo "  - ✅ Usuario '${SNAP_USER}' ya existe"; fi
   echo ""
   echo "════════════════════════════════════════════════════"
   read -rp "¿Deseas continuar? (y/N): " ans
@@ -170,40 +122,47 @@ confirm_actions(){
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# Instalación segura Snapserver desde release .deb
+# FIX: datadir + configdir + http-port
 # ────────────────────────────────────────────────────────────────────────────
-fix_snapserver_datadir(){
+fix_snapserver_unit(){
   local SERVICE_FILE="/usr/lib/systemd/system/snapserver.service"
-
   [ -f "$SERVICE_FILE" ] || return 0
 
-  echo "🩹 Ajustando rutas persistentes de Snapserver…"
+  echo "🩹 Ajustando unidad de Snapserver (datadir/configdir/http)…"
 
-  # Forzar datadir válido
+  # 1) datadir: reemplaza ${HOME} si existe
   sed -i 's|--server.datadir=${HOME}|--server.datadir=/var/lib/snapserver|g' "$SERVICE_FILE"
 
-  # Asegurar directorio de datos y configuración
-  mkdir -p /var/lib/snapserver/config
-  chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
-
-  # Forzar configdir válido
+  # 2) anexar configdir y http-port si no están presentes
   if ! grep -q -- '--server.configdir=' "$SERVICE_FILE"; then
     sed -i 's|ExecStart=.*|& --server.configdir=/var/lib/snapserver/config|' "$SERVICE_FILE"
   fi
+  if ! grep -q -- '--http-port' "$SERVICE_FILE"; then
+    sed -i 's|ExecStart=.*|& --http-port 1780|' "$SERVICE_FILE"
+  fi
+
+  # 3) asegurar docroot si existe snapweb (opcional)
+  if [ -d "/usr/share/snapserver/snapweb" ] && ! grep -q -- '--http-doc-root' "$SERVICE_FILE"; then
+    sed -i 's|ExecStart=.*|& --http-doc-root=/usr/share/snapserver/snapweb|' "$SERVICE_FILE"
+  fi
+
+  mkdir -p /var/lib/snapserver/config "$SNAP_FIFO_DIR"
+  chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
 
   systemctl daemon-reload
   systemctl restart snapserver || true
 
-  echo "✅ Snapserver ahora almacena configuración y datos en /var/lib/snapserver"
+  echo "✅ Unidad ajustada. datadir=/var/lib/snapserver, configdir=/var/lib/snapserver/config, http-port=1780"
 }
 
+# Watchdog/monitor: rescata cuando falla por bug del HOME u otros
 monitor_snapserver(){
   echo ""
   echo "🔎 Verificando estado de Snapserver..."
-
-  # Si el servicio no existe, no hacemos nada
   if ! systemctl list-unit-files | grep -q snapserver.service; then
     echo "❌ snapserver.service no está instalado."
+    echo ""
+    pause
     return
   fi
 
@@ -212,55 +171,50 @@ monitor_snapserver(){
 
   case "$status" in
     active)
-      echo "🟢 Snapserver está activo."
+      echo "🟢 Snapserver activo."
       ;;
-
     activating|reloading|starting)
-      echo "🔄 Snapserver se está iniciando..."
+      echo "🔄 Snapserver iniciando..."
       ;;
-
     failed|inactive)
-      echo "🚨 Snapserver está detenido o fallando."
-
-      # Detectar bug del datadir ($HOME)
-      if grep -q '\--server\.datadir=\${HOME}' /usr/lib/systemd/system/snapserver.service 2>/dev/null; then
-        echo "⚠️ Bug detectado: Snapserver está usando --server.datadir=\${HOME}"
-        echo "   Aplicando corrección automática..."
-        fix_snapserver_datadir
-        echo "🔁 Reintentando inicio..."
+      echo "🚨 Snapserver detenido/fallando. Intentando recuperación…"
+      # Si la unidad tiene ${HOME}, o los logs muestran /home/snapserver, aplicamos fix completo:
+      if grep -q '\--server\.datadir=\${HOME}' /usr/lib/systemd/system/snapserver.service 2>/dev/null \
+         || journalctl -u snapserver -n 50 --no-pager 2>/dev/null | grep -q "/home/snapserver"; then
+        fix_snapserver_unit
+        echo "🔁 Reintentando inicio…"
         systemctl restart snapserver || true
         sleep 1
-        if systemctl is-active snapserver &>/dev/null; then
-          echo "✅ Snapserver recuperado automáticamente."
-        else
-          echo "❌ Snapserver sigue fallando. Revisa logs con:"
-          echo "   journalctl -u snapserver -n 50 --no-pager"
-        fi
+      fi
+
+      if systemctl is-active snapserver &>/dev/null; then
+        echo "✅ Recuperado automáticamente."
       else
-        echo "ℹ️ No se detectó problema de datadir. Consulta logs:"
-        echo "   journalctl -u snapserver -n 50 --no-pager"
+        echo "❌ Sigue fallando. Revisa logs:"
+        echo "   journalctl -u snapserver -n 80 --no-pager"
       fi
       ;;
-
     *)
       echo "❓ Estado desconocido: $status"
       ;;
   esac
-
   echo ""
   pause
 }
 
+# ────────────────────────────────────────────────────────────────────────────
+# Instalación segura desde release
+# ────────────────────────────────────────────────────────────────────────────
 install_prereqs(){
   echo "🔍 Verificando/instalando prerequisitos…"
   apt-get update -y
   apt-get install -y ffmpeg curl jq
 
   id -u "$SNAP_USER" >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin "$SNAP_USER"
-
   [ -f "$CACHE_DIR/snapserver_current.deb" ] && cp -f "$CACHE_DIR/snapserver_current.deb" "$BACKUP_DIR/snapserver_prev.deb" || true
   [ -f "$CONF_FILE" ] && cp -f "$CONF_FILE" "$BACKUP_DIR/snapserver.conf.prev" || true
 
+  local ARCH CODENAME RELEASE_API SNAPVER PACKAGE_URL FILENAME
   ARCH="$(dpkg --print-architecture)"
   CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-unknown}")"
   RELEASE_API="https://api.github.com/repos/badaix/snapcast/releases/latest"
@@ -271,8 +225,7 @@ install_prereqs(){
   echo "📌 Versión: $SNAPVER"
 
   PACKAGE_URL="$(curl -s "$RELEASE_API" | jq -r '
-    .assets[]
-    | select(.name | test("_with-pipewire") | not)
+    .assets[] | select(.name | test("_with-pipewire") | not)
     | select(.name | test("snapserver_.*_'"$ARCH"'_'"$CODENAME"'\\.deb$"))
     | .browser_download_url
   ' | head -n1)"
@@ -280,8 +233,7 @@ install_prereqs(){
   if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
     echo "⚠️ Buscando fallback a bookworm…"
     PACKAGE_URL="$(curl -s "$RELEASE_API" | jq -r '
-      .assets[]
-      | select(.name | test("_with-pipewire") | not)
+      .assets[] | select(.name | test("_with-pipewire") | not)
       | select(.name | test("snapserver_.*_'"$ARCH"'_bookworm\\.deb$"))
       | .browser_download_url
     ' | head -n1)"
@@ -299,32 +251,111 @@ install_prereqs(){
   dpkg -i "$FILENAME" || apt-get -f install -y
   cp -f "/tmp/$FILENAME" "$CACHE_DIR/snapserver_current.deb" || true
 
-  mkdir -p "$SNAP_FIFO_DIR"
-  chown -R "$SNAP_USER:$SNAP_GROUP" "$SNAP_FIFO_DIR"
+  mkdir -p "$SNAP_FIFO_DIR" /var/lib/snapserver/config
+  chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
   [ -f "$CONF_FILE" ] || echo "[stream]" > "$CONF_FILE"
 
   systemctl daemon-reload
   systemctl enable snapserver
-  systemctl restart snapserver
-  echo "✅ Snapserver instalado y activo."
-  # Arreglar datadir si usa ${HOME}
-  fix_snapserver_datadir
+  systemctl restart snapserver || true
+  echo "✅ Snapserver instalado (o actualizado)."
+
+  # Aplicar fix robusto de unidad, puertos y dirs persistentes
+  fix_snapserver_unit
 }
 
 ensure_prereqs(){
   if needs_install; then
-    # Se requiere instalar algo → mostrar resumen + instalar
     confirm_actions
     install_prereqs
   else
-    # Todo listo → saltar directo
     echo "✅ Dependencias ya satisfechas. Saltando instalación."
     sleep 1
   fi
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# GESTIÓN DE STREAMS (sin ALSA)
+# JSON-RPC helpers (Snapweb/1780)
+# ────────────────────────────────────────────────────────────────────────────
+rpc(){ curl -s -H 'Content-Type: application/json' -X POST "$SNAP_RPC" -d "$1"; }
+rpc_status(){ rpc '{"id":1,"jsonrpc":"2.0","method":"Server.GetStatus"}'; }
+
+list_clients(){
+  echo ""
+  echo "👥 Clientes conectados:"
+  local js
+  js="$(rpc_status || true)"
+  if [ -z "$js" ] || ! jq -e . >/dev/null 2>&1 <<<"$js"; then
+    echo "❌ No se pudo consultar JSON-RPC. ¿Está Snapweb en :1780?"
+    echo ""
+    pause; return
+  fi
+  echo "$js" | jq -r '
+    .result.server.clients[]
+    | [.id, (.name // "unnamed"), (.host.name // .host.address // "unknown"), .group]
+    | @tsv
+  ' 2>/dev/null | awk -F'\t' 'BEGIN{printf "%-8s | %-24s | %-24s | %-12s\n","ID","Nombre","Host","Grupo"; print gensub(/./,"-","g",72)}{printf "%-8s | %-24s | %-24s | %-12s\n",$1,$2,$3,$4}'
+  echo ""
+  pause
+}
+
+auto_name_clients_from_hostname(){
+  echo ""
+  echo "✏️ Auto-nombrando clientes usando hostname..."
+  local js ids
+  js="$(rpc_status || true)"
+  [ -z "$js" ] && { echo "❌ JSON-RPC no disponible."; pause; return; }
+  ids=($(echo "$js" | jq -r '.result.server.clients[].id'))
+  for id in "${ids[@]}"; do
+    local host name
+    host="$(echo "$js" | jq -r ".result.server.clients[] | select(.id==\"$id\") | (.host.name // .host.address // \"client\")")"
+    name="${host%%.*}"
+    [ -z "$name" ] && name="client-$id"
+    rpc "$(jq -n --arg id "$id" --arg name "$name" '{id:2,"jsonrpc":"2.0","method":"Server.SetClientName","params":{"id":$id,"name":$name}}')" >/dev/null
+    echo "  • $id → $name"
+  done
+  echo "✅ Nombres actualizados."
+  echo ""
+  pause
+}
+
+group_all_clients_default(){
+  echo ""
+  echo "🧩 Agrupando todos los clientes en \"$DEFAULT_GROUP\"…"
+  local js ids
+  js="$(rpc_status || true)"
+  [ -z "$js" ] && { echo "❌ JSON-RPC no disponible."; pause; return; }
+  ids=($(echo "$js" | jq -r '.result.server.clients[].id'))
+  for id in "${ids[@]}"; do
+    rpc "$(jq -n --arg id "$id" --arg grp "$DEFAULT_GROUP" '{id:3,"jsonrpc":"2.0","method":"Server.SetClientGroup","params":{"id":$id,"group":$grp}}')" >/dev/null
+    echo "  • $id → $DEFAULT_GROUP"
+  done
+  echo "✅ Agrupación aplicada."
+  echo ""
+  pause
+}
+
+clients_menu(){
+  while true; do
+    clear
+    echo "──────────────── CLIENTES (JSON-RPC) ────────────────"
+    echo "1) Listar clientes"
+    echo "2) Auto-nombrar por hostname"
+    echo "3) Agrupar todos → \"$DEFAULT_GROUP\""
+    echo "4) Volver"
+    read -rp "Elige [1-4]: " c
+    case "$c" in
+      1) list_clients ;;
+      2) auto_name_clients_from_hostname ;;
+      3) group_all_clients_default ;;
+      4) return ;;
+      *) ;;
+    esac
+  done
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# Streams (sin ALSA en server)
 # ────────────────────────────────────────────────────────────────────────────
 get_stream_lines(){
   awk '
@@ -372,6 +403,7 @@ ExecStart=${ffmpeg_line}
 User=${SNAP_USER}
 Restart=always
 RestartSec=5
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
@@ -386,10 +418,8 @@ ffmpeg_cmd_for(){
 add_or_replace_stream_line(){
   local fifo="$1" name="$2" sample="48000:16:2" tmp
   tmp="$(mktemp)"
-
   grep -q "^\[stream\]" "$CONF_FILE" || echo "[stream]" >> "$CONF_FILE"
   sed "/$(escape_sed "$fifo")/d" "$CONF_FILE" > "$tmp" && mv "$tmp" "$CONF_FILE"
-
   local newline="source = pipe:///${fifo}?name=${name}&codec=pcm&sampleformat=${sample}"
   awk -v newline="$newline" '
     BEGIN{inserted=0}
@@ -408,7 +438,6 @@ create_stream(){
   echo "2) Archivo local (loop infinito)"
   echo "3) FFmpeg personalizado"
   read -rp "Elige tipo [1-3]: " kind
-
   read -rp "Nombre del stream: " STREAM_NAME
   [ -z "$STREAM_NAME" ] && { echo "❌ Nombre requerido."; pause; return; }
 
@@ -418,16 +447,19 @@ create_stream(){
 
   case "$kind" in
     1) read -rp "URL: " URL
+       [ -z "$URL" ] && { echo "❌ Sin URL."; pause; return; }
        INPUT_ARGS="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i \"$URL\"" ;;
     2) read -rp "Archivo local (mp3/wav/flac): " FILE
+       [ -f "$FILE" ] || { echo "❌ Archivo no encontrado."; pause; return; }
        INPUT_ARGS="-stream_loop -1 -re -i \"$FILE\"" ;;
     3) read -rp "Args FFmpeg: " CUSTOM
+       [ -z "$CUSTOM" ] && { echo "❌ Debes indicar args FFmpeg."; pause; return; }
        INPUT_ARGS="$CUSTOM" ;;
     *) echo "❌ Selección inválida."; pause; return ;;
   esac
 
   ensure_fifo "$FIFO_PATH"
-  FFMPEG_LINE="$(ffmpeg_cmd_for "$INPUT_ARGS" "$FIFO_PATH")"
+  local FFMPEG_LINE="$(ffmpeg_cmd_for "$INPUT_ARGS" "$FIFO_PATH")"
   write_unit "$SERVICE_NAME" "$FIFO_PATH" "$FFMPEG_LINE"
 
   systemctl daemon-reload
@@ -445,11 +477,9 @@ edit_stream(){
   read -rp "Número: " num
   mapfile -t sources < <(get_stream_lines)
   entry="${sources[$((num-1))]#*:}"
-
   fifo="$(sed -E 's|.*fifo/([^?]+)\?.*|\1|' <<<"$entry")"
   STREAM_ID="${fifo#snapfifo_}"
   SERVICE_NAME="$(service_name_for "$STREAM_ID")"
-
   ${EDITOR:-nano} "$SYSTEMD_DIR/$SERVICE_NAME"
   systemctl daemon-reload
   systemctl restart "$SERVICE_NAME"
@@ -480,6 +510,7 @@ check_activity(){
   echo ""
   echo "🎧 Estado actual:"
   mapfile -t sources < <(get_stream_lines)
+  [ "${#sources[@]}" -eq 0 ] && { echo "No hay streams."; pause; return; }
   for line in "${sources[@]}"; do
     entry="${line#*:}"
     name="$(sed -E 's/.*[?&]name=([^&]+).*/\1/' <<<"$entry")"
@@ -494,17 +525,62 @@ check_activity(){
 }
 
 # ────────────────────────────────────────────────────────────────────────────
+# Backups (config + datadir + servicios ffmpeg)
+# ────────────────────────────────────────────────────────────────────────────
+do_backup(){
+  local OUT="/var/backups/snapserver_backup_$(ts).tar.gz"
+  echo "🧯 Creando backup en $OUT ..."
+  mkdir -p /var/backups
+  tar -czf "$OUT" \
+    /var/lib/snapserver \
+    "$CONF_FILE" \
+    $SYSTEMD_DIR/ffmpeg-*.service 2>/dev/null || true
+  echo "✅ Backup listo: $OUT"
+  pause
+}
+
+do_restore(){
+  echo "🧰 Restaurar backup"
+  ls -1 /var/backups/snapserver_backup_*.tar.gz 2>/dev/null || { echo "❌ No hay backups en /var/backups/"; pause; return; }
+  read -rp "Ruta del backup a restaurar: " BK
+  [ -f "$BK" ] || { echo "❌ No existe $BK"; pause; return; }
+  echo "⚠️ Esto sobrescribirá configuración/servicios. Confirmar? (y/N): "
+  read -r ans
+  [[ "$ans" =~ ^[Yy]$ ]] || { echo "❌ Cancelado"; pause; return; }
+  systemctl stop snapserver || true
+  tar -xzf "$BK" -C /
+  chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
+  systemctl daemon-reload
+  systemctl restart snapserver || true
+  echo "✅ Restaurado."
+  pause
+}
+
+backup_menu(){
+  while true; do
+    clear
+    echo "──────────────── BACKUPS ─────────────────"
+    echo "1) Crear backup"
+    echo "2) Restaurar backup"
+    echo "3) Volver"
+    read -rp "Elige [1-3]: " b
+    case "$b" in
+      1) do_backup ;;
+      2) do_restore ;;
+      3) return ;;
+      *) ;;
+    esac
+  done
+}
+
+# ────────────────────────────────────────────────────────────────────────────
 # Menú principal
 # ────────────────────────────────────────────────────────────────────────────
 main_menu(){
   ensure_prereqs
   detect_lxc
-  if [[ "$LXC_MODE" -eq 1 ]]; then
-    lxc_instructions
-  fi
-
-  # NUEVO: verificación automática del servidor al arrancar el menú
-  monitor_snapserver
+  [[ "$LXC_MODE" -eq 1 ]] && lxc_instructions
+  monitor_snapserver   # verificación + autorreparación
 
   while true; do
     clear
@@ -515,18 +591,22 @@ main_menu(){
     echo "2) Listar streams"
     echo "3) Editar un stream"
     echo "4) Eliminar stream(s)"
-    echo "5) Ver estado"
-    echo "6) Salir"
+    echo "5) Ver estado de servicios FFmpeg"
+    echo "6) Clientes (listar, auto-nombrar, agrupar)"
+    echo "7) Backups (crear/restaurar)"
+    echo "8) Salir"
     echo "═══════════════════════════════════════════════════"
-    read -rp "Elige [1-6]: " opt
+    read -rp "Elige [1-8]: " opt
     case "$opt" in
       1) create_stream ;;
       2) get_stream_lines | nl -ba; pause ;;
       3) edit_stream ;;
       4) delete_streams ;;
       5) check_activity ;;
-      6) exit 0 ;;
-      *) pause ;;
+      6) clients_menu ;;
+      7) backup_menu ;;
+      8) exit 0 ;;
+      *) ;;
     esac
   done
 }
