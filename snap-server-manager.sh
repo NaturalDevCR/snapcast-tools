@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.33
+# SNAPSTREAM MANAGER v2025.10.34
 # Gestión avanzada de Snapserver + FFmpeg + Streams + LXC-aware
 # Instalación segura desde releases .deb oficiales (sin compilar), SHA256 y rollback.
 # Autor: Josue / GPT-5 — No bullshit edition.
@@ -175,27 +175,26 @@ confirm_actions(){
 fix_snapserver_datadir(){
   local SERVICE_FILE="/usr/lib/systemd/system/snapserver.service"
 
-  # Verifica que el archivo exista
   [ -f "$SERVICE_FILE" ] || return 0
 
-  # Verifica si realmente contiene ${HOME} (solo en versiones nuevas problemáticas)
-  if grep -q '\--server\.datadir=\${HOME}' "$SERVICE_FILE"; then
-    echo "🩹 Corrigiendo ruta de datadir en snapserver.service (removiendo \$HOME)…"
+  echo "🩹 Ajustando rutas persistentes de Snapserver…"
 
-    # Reemplazar SOLO esa parte
-    sed -i 's|--server.datadir=${HOME}|--server.datadir=/var/lib/snapserver|g' "$SERVICE_FILE"
+  # Forzar datadir válido
+  sed -i 's|--server.datadir=${HOME}|--server.datadir=/var/lib/snapserver|g' "$SERVICE_FILE"
 
-    # Asegurar directorio
-    mkdir -p /var/lib/snapserver
-    chown "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
+  # Asegurar directorio de datos y configuración
+  mkdir -p /var/lib/snapserver/config
+  chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
 
-    systemctl daemon-reload
-    systemctl restart snapserver || true
-
-    echo "✅ Snapserver ahora usa /var/lib/snapserver como datadir."
-  else
-    echo "✅ snapserver.service ya utiliza un datadir válido. No se realizaron cambios."
+  # Forzar configdir válido
+  if ! grep -q -- '--server.configdir=' "$SERVICE_FILE"; then
+    sed -i 's|ExecStart=.*|& --server.configdir=/var/lib/snapserver/config|' "$SERVICE_FILE"
   fi
+
+  systemctl daemon-reload
+  systemctl restart snapserver || true
+
+  echo "✅ Snapserver ahora almacena configuración y datos en /var/lib/snapserver"
 }
 
 monitor_snapserver(){
