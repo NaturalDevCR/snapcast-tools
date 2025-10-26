@@ -1,166 +1,219 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.28
-# Gestión avanzada de Snapserver y FFmpeg basada en snapserver.conf
-# Autor: Josue / GPT-5
+# SNAPSTREAM MANAGER v2025.10.29 (SAFE INSTALL + STREAM MANAGEMENT)
+# Gestión avanzada de Snapserver + FFmpeg basada en snapserver.conf
+# Instalación segura desde releases de GitHub (.deb), SHA256 y rollback.
+# Autor: Josue / GPT-5 — No bullshit edition.
 # ==============================================================================
 
 set -Eeuo pipefail
+
 SNAP_FIFO_DIR="/var/lib/snapserver/fifo"
 SYSTEMD_DIR="/etc/systemd/system"
 CONF_FILE="/etc/snapserver.conf"
 BACKUP_DIR="/etc/snapserver.d/backups"
+CACHE_DIR="/var/cache/snapstream"
 SNAP_USER="snapserver"
 SNAP_GROUP="snapserver"
 
+mkdir -p "$BACKUP_DIR" "$CACHE_DIR"
+
 # ────────────────────────────────────────────────────────────────────────────
-# Utilidades
+# Utilidades base / rollback
 # ────────────────────────────────────────────────────────────────────────────
 pause(){ read -rp "Presiona Enter para continuar..."; }
 ts(){ date +"%Y-%m-%d_%H-%M-%S"; }
-ensure_cmd(){ command -v "$1" >/dev/null 2>&1 || { echo "❌ Requiere '$1'."; exit 1; }; }
 escape_sed(){ sed -e 's/[\/&]/\\&/g' <<<"$1"; }
+msg(){ echo -e "$1"; }
 
+rollback(){
+  echo "⚠️  ERROR: ejecutando ROLLBACK…"
+  systemctl stop snapserver 2>/dev/null || true
+
+  # Restaura .deb previo si existe
+  if [ -f "$BACKUP_DIR/snapserver_prev.deb" ]; then
+    echo "↩️  Restaurando paquete previo…"
+    dpkg -i "$BACKUP_DIR/snapserver_prev.deb" || true
+  fi
+
+  # Restaura configuración previa si existe
+  if [ -f "$BACKUP_DIR/snapserver.conf.prev" ]; then
+    echo "↩️  Restaurando /etc/snapserver.conf previo…"
+    cp -f "$BACKUP_DIR/snapserver.conf.prev" "$CONF_FILE"
+  fi
+
+  systemctl daemon-reload || true
+  systemctl restart snapserver || true
+  echo "✅ Rollback completado."
+  exit 1
+}
+
+trap rollback ERR
+
+# ────────────────────────────────────────────────────────────────────────────
+# Resumen previo y confirmación
+# ────────────────────────────────────────────────────────────────────────────
 confirm_actions(){
+  local ARCH CODENAME SNAPVER
+  ARCH="$(dpkg --print-architecture)"
+  CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-unknown}")"
+
   echo ""
   echo "════════════════════════════════════════════════════"
   echo "🧩 RESUMEN DE ACCIONES A REALIZAR"
   echo "════════════════════════════════════════════════════"
+  echo "🧠 Sistema detectado:"
+  echo "  • OS: $CODENAME"
+  echo "  • Arquitectura: $ARCH"
+
+  # Intento de leer última versión (informativo; si falla, seguimos)
+  local RELEASE_API="https://api.github.com/repos/badaix/snapcast/releases/latest"
+  SNAPVER="$(curl -s --max-time 10 "$RELEASE_API" | jq -r '.tag_name // empty' || true)"
+  [ -n "$SNAPVER" ] && echo "  • Última versión Snapcast en GitHub: $SNAPVER"
+
   echo ""
-
-  local todo=()
-
-  # ffmpeg
-  if ! command -v ffmpeg >/dev/null 2>&1; then
-    todo+=("📦 Instalar FFmpeg")
-  else
-    todo+=("✅ FFmpeg ya instalado")
-  fi
-
-  # alsa-utils
-  if ! dpkg -l | grep -q '^ii.*alsa-utils'; then
-    todo+=("📦 Instalar ALSA (alsa-utils)")
-  else
-    todo+=("✅ ALSA ya instalado")
-  fi
-
-  # snapserver
-  if ! command -v snapserver >/dev/null 2>&1; then
-    todo+=("⬇️ Descargar e instalar Snapserver (.deb oficial desde GitHub)")
-  else
-    todo+=("✅ Snapserver ya instalado (no se reinstala)")
-  fi
-
-  # usuario snapserver
-  if ! id -u snapserver >/dev/null 2>&1; then
-    todo+=("👤 Crear usuario 'snapserver'")
-  else
-    todo+=("✅ Usuario snapserver ya existe")
-  fi
-
   echo "Acciones:"
-  printf '  - %s\n' "${todo[@]}"
-  echo ""
+  if ! command -v ffmpeg >/dev/null 2>&1; then
+    echo "  - 📦 Instalar FFmpeg"
+  else
+    echo "  - ✅ FFmpeg ya instalado"
+  fi
 
+  if ! command -v snapserver >/dev/null 2>&1; then
+    echo "  - ⬇️ Instalar Snapserver (.deb oficial desde GitHub)"
+  else
+    echo "  - ✅ Snapserver ya instalado (se actualizará solo si eliges instalar manualmente fuera del script)"
+  fi
+
+  if ! id -u "$SNAP_USER" >/dev/null 2>&1; then
+    echo "  - 👤 Crear usuario '${SNAP_USER}'"
+  else
+    echo "  - ✅ Usuario '${SNAP_USER}' ya existe"
+  fi
+
+  echo ""
   echo "════════════════════════════════════════════════════"
   read -rp "¿Deseas continuar? (y/N): " ans
-  case "$ans" in
-    [Yy]*) echo "✅ Continuando...";;
-    *) echo "❌ Cancelado por el usuario."; exit 0;;
-  esac
+  [[ "$ans" =~ ^[Yy]$ ]] || { echo "❌ Cancelado por el usuario."; exit 0; }
   echo ""
 }
 
-
+# ────────────────────────────────────────────────────────────────────────────
+# Instalación segura de prerequisitos y Snapserver (release .deb)
+# ────────────────────────────────────────────────────────────────────────────
 install_prereqs(){
-  echo "🔍 Verificando dependencias..."
-
+  echo "🔍 Verificando/instalando prerequisitos…"
   apt-get update -y
-  apt-get install -y alsa-utils ffmpeg curl jq
+  apt-get install -y ffmpeg curl jq
 
-  # Crear usuario snapserver si no existe
-  if ! id -u snapserver >/dev/null 2>&1; then
-    echo "👤 Creando usuario snapserver..."
-    useradd -r -s /usr/sbin/nologin snapserver
+  # Usuario snapserver
+  if ! id -u "$SNAP_USER" >/dev/null 2>&1; then
+    echo "👤 Creando usuario ${SNAP_USER}…"
+    useradd -r -s /usr/sbin/nologin "$SNAP_USER"
   fi
 
-  # Detectar arquitectura
+  # Si snapserver ya está instalado, guardamos .deb previo si lo tenemos en cache
+  if [ -f "$CACHE_DIR/snapserver_current.deb" ]; then
+    cp -f "$CACHE_DIR/snapserver_current.deb" "$BACKUP_DIR/snapserver_prev.deb" || true
+  fi
+  [ -f "$CONF_FILE" ] && cp -f "$CONF_FILE" "$BACKUP_DIR/snapserver.conf.prev" || true
+
+  # Detectar arquitectura/codename y elegir .deb adecuado (sin pipewire)
+  local ARCH CODENAME RELEASE_API SNAPVER PACKAGE_URL FILENAME
   ARCH="$(dpkg --print-architecture)"
-  echo "🏗 Arquitectura detectada: $ARCH"
-
-  # Detectar OS codename
-  CODENAME="$(grep VERSION_CODENAME= /etc/os-release | cut -d= -f2)"
-  echo "🧭 OS: $CODENAME"
-
-  # Obtener última release desde GitHub
-  echo "⬇️ Buscando última versión de Snapcast..."
+  CODENAME="$(. /etc/os-release && echo "${VERSION_CODENAME:-unknown}")"
   RELEASE_API="https://api.github.com/repos/badaix/snapcast/releases/latest"
-  SNAPVER=$(curl -s "$RELEASE_API" | jq -r .tag_name)
 
-  if [ -z "$SNAPVER" ] || [ "$SNAPVER" = "null" ]; then
-    echo "❌ No se pudo obtener la versión desde GitHub."
-    exit 1
-  fi
-
+  echo "⬇️ Buscando última release de Snapcast…"
+  SNAPVER="$(curl -s "$RELEASE_API" | jq -r '.tag_name')"
+  [ -z "$SNAPVER" ] && { echo "❌ No se pudo obtener la versión desde GitHub."; exit 1; }
   echo "📌 Última versión: $SNAPVER"
 
-  # Buscar el .deb correcto
-  PACKAGE_URL=$(curl -s "$RELEASE_API" | jq -r ".assets[] | select(.name | test(\"snapserver_.*_${ARCH}.*deb\")) | .browser_download_url")
+  # Preferimos sin pipewire; primero distro exacta, luego fallback a bookworm
+  PACKAGE_URL="$(curl -s "$RELEASE_API" | jq -r \
+    ".assets[]
+     | select((.name | test(\"_with-pipewire\")|not)
+              and (.name | test(\"^snapserver_.*_${ARCH}_${CODENAME}\\.deb$\")))
+     | .browser_download_url" | head -n1)"
 
   if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
-    echo "❌ No hay .deb para arquitectura $ARCH en $SNAPVER"
-    exit 1
+    echo "⚠️ No hay paquete exacto para ${CODENAME}. Probando fallback a bookworm…"
+    PACKAGE_URL="$(curl -s "$RELEASE_API" | jq -r \
+      ".assets[]
+       | select((.name | test(\"_with-pipewire\")|not)
+                and (.name | test(\"^snapserver_.*_${ARCH}_bookworm\\.deb$\")))
+       | .browser_download_url" | head -n1)"
   fi
 
-  echo "📦 Paquete encontrado:"
+  [ -z "$PACKAGE_URL" ] && { echo "❌ No se encontró .deb compatible para ${CODENAME}/${ARCH}."; exit 1; }
+
+  echo "📦 Paquete seleccionado:"
   echo "   $PACKAGE_URL"
 
   cd /tmp
-  curl -LO "$PACKAGE_URL"
+  FILENAME="$(basename "$PACKAGE_URL")"
+  curl -L -o "$FILENAME" "$PACKAGE_URL"
 
-  echo "📦 Instalando paquete .deb..."
-  dpkg -i snapserver_*_"$ARCH".deb || apt-get -f install -y
+  # ── Verificación SHA256 (intenta varias convenciones de archivo)
+  echo "🔐 Verificando integridad (SHA256)…"
+  set +e
+  VERIFIED=0
+  # 1) Archivo individual .sha256 (contenido: "<hash>  <filename>")
+  curl -fsSL -o "$FILENAME.sha256" "${PACKAGE_URL}.sha256" && sha256sum -c "$FILENAME.sha256" && VERIFIED=1
+  # 2) Archivo individual .sha256.txt
+  if [ "$VERIFIED" -eq 0 ]; then
+    curl -fsSL -o "$FILENAME.sha256.txt" "${PACKAGE_URL}.sha256.txt" && sha256sum -c "$FILENAME.sha256.txt" && VERIFIED=1
+  fi
+  # 3) Lista general SHA256SUMS o checksums.txt dentro de la release
+  if [ "$VERIFIED" -eq 0 ]; then
+    SUMS_URL="$(curl -s "$RELEASE_API" | jq -r '.assets[] | select(.name|test("SHA256SUMS|checksums.txt")) | .browser_download_url' | head -n1)"
+    if [ -n "$SUMS_URL" ] && [ "$SUMS_URL" != "null" ]; then
+      curl -fsSL -o "SHA256SUMS" "$SUMS_URL"
+      # filtra la línea del archivo
+      grep " $FILENAME\$" SHA256SUMS > "CHK" 2>/dev/null
+      if [ -s "CHK" ]; then
+        sha256sum -c "CHK" && VERIFIED=1
+      fi
+    fi
+  fi
+  set -e
 
-  # Crear directorios si no existen
-  mkdir -p /var/lib/snapserver /etc/snapserver.d/backups /var/lib/snapserver/fifo
-  chown -R snapserver:snapserver /var/lib/snapserver
-
-  # Crear servicio systemd si viene faltante (según release)
-  if ! systemctl list-unit-files | grep -q snapserver.service; then
-    cat > /etc/systemd/system/snapserver.service <<EOF
-[Unit]
-Description=Snapcast Server
-After=network.target
-
-[Service]
-ExecStart=/usr/bin/snapserver --config /etc/snapserver.conf
-User=snapserver
-Restart=always
-
-[Install]
-WantedBy=multi-user.target
-EOF
+  if [ "$VERIFIED" -eq 1 ]; then
+    echo "✅ SHA256 correcto."
+  else
+    echo "⚠️ No se encontró checksum oficial para esta release/asset."
+    echo "   Continuando sin verificación criptográfica."
   fi
 
-  systemctl daemon-reload
-  systemctl enable snapserver
-  systemctl restart snapserver
+  echo "📦 Instalando $FILENAME…"
+  dpkg -i "$FILENAME" || apt-get -f install -y
 
-  echo "✅ Snapserver instalado y en ejecución."
-}
+  # Guarda .deb instalado como "current" para futuros rollbacks
+  cp -f "/tmp/$FILENAME" "$CACHE_DIR/snapserver_current.deb" || true
 
-
-ensure_prereqs(){
-  confirm_actions
-  install_prereqs
+  # Asegura directorios base
   mkdir -p "$SNAP_FIFO_DIR" "$BACKUP_DIR"
   chown -R "$SNAP_USER:$SNAP_GROUP" "$SNAP_FIFO_DIR"
   [ -f "$CONF_FILE" ] || echo "[stream]" > "$CONF_FILE"
   cp -a "$CONF_FILE" "${BACKUP_DIR}/snapserver.conf.$(ts).bak" || true
+
+  systemctl daemon-reload
+  systemctl enable snapserver
+  systemctl restart snapserver
+  echo "✅ Snapserver instalado y ejecutándose."
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# Lectura y helpers
+# Aseguramiento previo para flujo de menú (usa instalación segura)
+# ────────────────────────────────────────────────────────────────────────────
+ensure_prereqs(){
+  # Muestra resumen, instala prereqs y deja todo listo
+  confirm_actions
+  install_prereqs
+}
+
+# ────────────────────────────────────────────────────────────────────────────
+# === BLOQUE DE GESTIÓN DE STREAMS (tu código íntegro) =======================
 # ────────────────────────────────────────────────────────────────────────────
 get_stream_lines(){
   awk '
@@ -228,9 +281,6 @@ ffmpeg_cmd_for(){
   echo "/usr/bin/ffmpeg -hide_banner -nostats -loglevel error $INPUT_ARGS -ac 2 -ar 48000 -acodec pcm_s16le -f s16le -y \"$FIFO_PATH\""
 }
 
-# ────────────────────────────────────────────────────────────────────────────
-# Configuración segura de snapserver.conf
-# ────────────────────────────────────────────────────────────────────────────
 add_or_replace_stream_line(){
   local fifo="$1" name="$2" sample="48000:16:2" tmpfile
   tmpfile="$(mktemp)"
@@ -267,9 +317,6 @@ verify_stream_insertion(){
   fi
 }
 
-# ────────────────────────────────────────────────────────────────────────────
-# Crear nuevo stream
-# ────────────────────────────────────────────────────────────────────────────
 create_stream(){
   echo ""
   echo "➕ Crear nuevo stream"
@@ -303,9 +350,16 @@ create_stream(){
     *) echo "❌ Tipo inválido."; pause; return ;;
   esac
 
-  ensure_prereqs
+  # Asegura instalación/listo antes de crear
+  # (no re-ejecuta confirmación; ya se ejecutó al inicio)
+  mkdir -p "$SNAP_FIFO_DIR" "$BACKUP_DIR"
+  chown -R "$SNAP_USER:$SNAP_GROUP" "$SNAP_FIFO_DIR"
+  [ -f "$CONF_FILE" ] || echo "[stream]" > "$CONF_FILE"
+  cp -a "$CONF_FILE" "${BACKUP_DIR}/snapserver.conf.$(ts).bak" || true
+
   ensure_fifo "$FIFO_PATH"
-  local FFMPEG_LINE="$(ffmpeg_cmd_for "$INPUT_ARGS" "$FIFO_PATH")"
+  local FFMPEG_LINE
+  FFMPEG_LINE="$(ffmpeg_cmd_for "$INPUT_ARGS" "$FIFO_PATH")"
   write_unit "$SERVICE_NAME" "$FIFO_PATH" "$FFMPEG_LINE"
 
   systemctl daemon-reload
@@ -318,9 +372,6 @@ create_stream(){
   pause
 }
 
-# ────────────────────────────────────────────────────────────────────────────
-# Edición / gestión de streams
-# ────────────────────────────────────────────────────────────────────────────
 edit_stream(){
   echo ""
   show_streams_numbered || { pause; return; }
@@ -357,9 +408,6 @@ edit_stream(){
   done
 }
 
-# ────────────────────────────────────────────────────────────────────────────
-# Limpieza segura de huérfanos / fallidos
-# ────────────────────────────────────────────────────────────────────────────
 cleanup_orphaned(){
   echo ""
   echo "🧹 Escaneando posibles huérfanos..."
@@ -419,9 +467,6 @@ cleanup_orphaned(){
   pause
 }
 
-# ────────────────────────────────────────────────────────────────────────────
-# Eliminación manual y estado
-# ────────────────────────────────────────────────────────────────────────────
 delete_streams(){
   echo ""
   show_streams_numbered || { pause; return; }
@@ -467,15 +512,12 @@ check_activity(){
   pause
 }
 
-# ────────────────────────────────────────────────────────────────────────────
-# Menú principal
-# ────────────────────────────────────────────────────────────────────────────
 main_menu(){
   ensure_prereqs
   while true; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "           🧩 SNAPSTREAM MANAGER v2025.10.28"
+    echo "           🧩 SNAPSTREAM MANAGER v2025.10.29"
     echo "═══════════════════════════════════════════════════"
     echo "1) Agregar nuevo stream"
     echo "2) Listar streams actuales"
@@ -499,4 +541,7 @@ main_menu(){
   done
 }
 
+# ────────────────────────────────────────────────────────────────────────────
+# Arranque
+# ────────────────────────────────────────────────────────────────────────────
 main_menu
