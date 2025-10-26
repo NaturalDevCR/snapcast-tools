@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.30
+# SNAPSTREAM MANAGER v2025.10.31
 # Gestión avanzada de Snapserver + FFmpeg + Streams + LXC-aware
 # Instalación segura desde releases .deb oficiales (sin compilar), SHA256 y rollback.
 # Autor: Josue / GPT-5 — No bullshit edition.
@@ -70,25 +70,48 @@ detect_lxc(){
 lxc_instructions(){
   echo ""
   echo "─────────────────────────────────────────────"
-  echo "   🧠 CONFIGURACIÓN REQUERIDA EN EL HOST LXC"
+  echo "   🧠 EJECUCIÓN EN CONTENEDOR LXC DETECTADA"
   echo "─────────────────────────────────────────────"
-  echo "En el host Proxmox ejecutar (reemplaza <ID>):"
+  echo "Snapserver en LXC puede funcionar de dos maneras:"
   echo ""
-  echo "pct stop <ID>"
+  echo " 1) 🟢 Solo orquestación (modo típico)"
+  echo "    - No reproduce audio aquí"
+  echo "    - No captura audio aquí"
+  echo "    - Los clientes reproducen"
+  echo "    → NO requiere /dev/snd ni configuraciones adicionales."
   echo ""
-  echo "echo \"lxc.cgroup2.devices.allow = c 116:* rwm\" >> /etc/pve/lxc/<ID>.conf"
-  echo "echo \"lxc.mount.entry = /dev/snd dev/snd none bind,optional,create=dir\" >> /etc/pve/lxc/<ID>.conf"
+  echo " 2) 🎤 Captura de audio local (ej: mixer / mic / tarjeta USB)"
+  echo "    - FFmpeg usará ALSA dentro del CT"
+  echo "    → Sí requiere /dev/snd y permisos de cgroup."
   echo ""
-  echo "pct start <ID>"
+  echo "─────────────────────────────────────────────"
+  read -rp "¿Vas a capturar audio desde hardware local en este contenedor? (y/N): " use_hw
   echo ""
-  echo "Si el CT es no privilegiado:"
-  echo "pct set <ID> -features nesting=1,mount=1"
-  echo ""
-  echo "Luego dentro del contenedor:"
-  echo "systemctl restart snapserver"
-  echo ""
-  pause
+  if [[ "$use_hw" =~ ^[Yy]$ ]]; then
+    echo "⚙️ Se requiere habilitar /dev/snd en el host Proxmox."
+    echo ""
+    echo "Ejecuta en el HOST (Proxmox), reemplazando <ID>:"
+    echo ""
+    echo "  pct stop <ID>"
+    echo "  echo \"lxc.cgroup2.devices.allow = c 116:* rwm\" >> /etc/pve/lxc/<ID>.conf"
+    echo "  echo \"lxc.mount.entry = /dev/snd dev/snd none bind,optional,create=dir\" >> /etc/pve/lxc/<ID>.conf"
+    echo "  pct start <ID>"
+    echo ""
+    echo "Si el CT es no privilegiado:"
+    echo "  pct set <ID> -features nesting=1,mount=1"
+    echo ""
+    echo "Después dentro del contenedor:"
+    echo "  systemctl restart snapserver"
+    echo ""
+    pause
+  else
+    echo "🟢 Perfecto. Modo servidor puro."
+    echo "   No se configurará /dev/snd porque no se necesita."
+    echo ""
+    pause
+  fi
 }
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Resumen previo y aprobación del usuario
@@ -379,7 +402,9 @@ check_activity(){
 main_menu(){
   ensure_prereqs
   detect_lxc
-  [[ "$LXC_MODE" -eq 1 ]] && lxc_instructions
+  if [[ "$LXC_MODE" -eq 1 ]]; then
+    lxc_instructions
+  fi
 
   while true; do
     clear
