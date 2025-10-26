@@ -28,22 +28,30 @@ msg(){ echo -e "$1"; }
 
 rollback(){
   echo "⚠️  ERROR: ejecutando ROLLBACK…"
-  systemctl stop snapserver 2>/dev/null || true
 
-  # Restaura .deb previo si existe
+  # Solo intentamos restaurar si existía previamente un snapserver real
+  if systemctl list-unit-files | grep -q snapserver.service; then
+    systemctl stop snapserver 2>/dev/null || true
+  fi
+
   if [ -f "$BACKUP_DIR/snapserver_prev.deb" ]; then
     echo "↩️  Restaurando paquete previo…"
     dpkg -i "$BACKUP_DIR/snapserver_prev.deb" || true
+  else
+    echo "ℹ️  No había snapserver previo, no se restaura .deb"
   fi
 
-  # Restaura configuración previa si existe
   if [ -f "$BACKUP_DIR/snapserver.conf.prev" ]; then
-    echo "↩️  Restaurando /etc/snapserver.conf previo…"
+    echo "↩️  Restaurando configuración previa…"
     cp -f "$BACKUP_DIR/snapserver.conf.prev" "$CONF_FILE"
   fi
 
   systemctl daemon-reload || true
-  systemctl restart snapserver || true
+
+  if systemctl list-unit-files | grep -q snapserver.service; then
+    systemctl restart snapserver || true
+  fi
+
   echo "✅ Rollback completado."
   exit 1
 }
@@ -130,12 +138,14 @@ install_prereqs(){
   echo "📌 Última versión: $SNAPVER"
 
   # Preferimos sin pipewire; primero distro exacta, luego fallback a bookworm
+  # Buscamos .deb exacto para codename y arquitectura (sin pipewire)
   PACKAGE_URL="$(curl -s "$RELEASE_API" | jq -r \
     ".assets[]
      | select((.name | test(\"_with-pipewire\")|not)
               and (.name | test(\"^snapserver_.*_${ARCH}_${CODENAME}\\.deb$\")))
      | .browser_download_url" | head -n1)"
 
+  # Fallback a bookworm si no existe paquete exacto
   if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
     echo "⚠️ No hay paquete exacto para ${CODENAME}. Probando fallback a bookworm…"
     PACKAGE_URL="$(curl -s "$RELEASE_API" | jq -r \
@@ -143,6 +153,11 @@ install_prereqs(){
        | select((.name | test(\"_with-pipewire\")|not)
                 and (.name | test(\"^snapserver_.*_${ARCH}_bookworm\\.deb$\")))
        | .browser_download_url" | head -n1)"
+  fi
+
+  if [ -z "$PACKAGE_URL" ] || [ "$PACKAGE_URL" = "null" ]; then
+    echo "❌ No existe paquete compatible para ${ARCH}/${CODENAME} ni fallback disponible."
+    exit 1
   fi
 
   [ -z "$PACKAGE_URL" ] && { echo "❌ No se encontró .deb compatible para ${CODENAME}/${ARCH}."; exit 1; }
