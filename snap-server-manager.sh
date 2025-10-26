@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.41
+# SNAPSTREAM MANAGER v2025.10.42
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC clients + Backups + LXC-aware
 # Instalación desde .deb oficial (GitHub), fix datadir/configdir, watchdog y utilidades.
 # Autor: Josue / GPT-5 — “No bullshit” build.
@@ -289,18 +289,10 @@ rpc_status(){ rpc '{"id":1,"jsonrpc":"2.0","method":"Server.GetStatus"}'; }
 list_clients(){
   echo ""
   echo "👥 Clientes conectados:"
-  local js
-  js="$(rpc_status || true)"
-  if [ -z "$js" ] || ! jq -e . >/dev/null 2>&1 <<<"$js"; then
-    echo "❌ No se pudo consultar JSON-RPC. ¿Está Snapweb en :1780?"
-    echo ""
-    pause; return
-  fi
-  echo "$js" | jq -r '
-    .result.server.clients[]
-    | [.id, (.name // "unnamed"), (.host.name // .host.address // "unknown"), .group]
-    | @tsv
-  ' 2>/dev/null | awk -F'\t' 'BEGIN{printf "%-8s | %-24s | %-24s | %-12s\n","ID","Nombre","Host","Grupo"; print gensub(/./,"-","g",72)}{printf "%-8s | %-24s | %-24s | %-12s\n",$1,$2,$3,$4}'
+  curl -s http://localhost:1780/jsonrpc -H "Content-Type: application/json" \
+    --data '{"id":1,"jsonrpc":"2.0","method":"Server.GetStatus"}' |
+  jq -r '.result.server.status.clients[]? | "\(.id) \(.host.name)"' |
+  awk '{ gsub(/"/, "", $0); print }' || echo "❌ No hay clientes activos."
   echo ""
   pause
 }
