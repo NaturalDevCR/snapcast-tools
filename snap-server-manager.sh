@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.40
+# SNAPSTREAM MANAGER v2025.10.41
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC clients + Backups + LXC-aware
 # Instalación desde .deb oficial (GitHub), fix datadir/configdir, watchdog y utilidades.
 # Autor: Josue / GPT-5 — “No bullshit” build.
@@ -150,9 +150,15 @@ fix_snapserver_unit(){
   chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
 
   systemctl daemon-reload
-  systemctl restart snapserver || true
 
+  # NUEVO: limpiar contador de fallos antes de intentar reiniciar
+  systemctl reset-failed snapserver.service 2>/dev/null || true
+  
+  # Reintentar arranque sin bloquearse por StartLimitHit
+  systemctl restart snapserver.service || true
+  
   echo "✅ Unidad ajustada. datadir=/var/lib/snapserver, configdir=/var/lib/snapserver/config, http-port=1780"
+
 }
 
 # Watchdog/monitor: rescata cuando falla por bug del HOME u otros
