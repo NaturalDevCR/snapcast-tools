@@ -324,16 +324,23 @@ setup_snapclient() {
     exit 1
   fi
 
-  read -rp "Selecciona el número de dispositivo (ej. ${DEVICE_NUMS[0]}): " DEV_ID
+   read -rp "Selecciona el número de dispositivo (ej. ${DEVICE_NUMS[0]}): " DEV_ID
   [[ -z "$DEV_ID" ]] && DEV_ID="${DEVICE_NUMS[0]}"
 
-  local CARD_NAME
-  CARD_NAME=$(aplay -l 2>/dev/null | awk -v id=$CARD_ID -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
-  local SAFE_CARD_NAME
-  SAFE_CARD_NAME=$(echo "${CARD_NAME:-CARD$CARD_ID}" | tr -d ' ')
-  local ALSA_DEVICE="plughw:CARD=$SAFE_CARD_NAME,DEV=$DEV_ID"
+  # === Detección robusta del nombre real de la tarjeta ALSA ===
+  if [ -f "/proc/asound/card${CARD_ID}/id" ]; then
+    CARD_NAME=$(cat /proc/asound/card${CARD_ID}/id)
+  else
+    CARD_NAME=$(aplay -l 2>/dev/null | awk -v id=$CARD_ID -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
+  fi
 
-  echo "✅ Usando ALSA: $ALSA_DEVICE"
+  SAFE_CARD_NAME=$(echo "$CARD_NAME" | tr -d ' ')
+  ALSA_DEVICE="plughw:CARD=$SAFE_CARD_NAME,DEV=$DEV_ID"
+
+  echo ""
+  echo "✅ Tarjeta detectada correctamente:"
+  echo "   CARD_NAME = $CARD_NAME"
+  echo "   ALSA_DEVICE = $ALSA_DEVICE"
   echo ""
 
   read -rp "Ingrese la IP del Snapserver: " SNAPSERVER_IP
