@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.52 (Merged and Improved Build)
+# SNAPSTREAM MANAGER v2025.10.53 (Merged and Improved Build)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Installation from .deb, datadir/configdir fix, watchdog, and silent fallback.
 # Author: Josue / GPT-5 / Gemini — “No bullshit” build.
@@ -143,13 +143,16 @@ fix_snapserver_unit(){
   echo "🩹 Adjusting Snapserver unit (datadir/configdir/http)…"
   sed -i 's|--server.datadir=${HOME}|--server.datadir=/var/lib/snapserver|g' "$SERVICE_FILE"
   if ! grep -q -- '--server.configdir=' "$SERVICE_FILE"; then
-    sed -i 's|ExecStart=.*|& --server.configdir=/var/lib/snapserver/config|' "$SERVICE_FILE"
+    sed -i 's|ExecStart=.*|& --server.conf=/etc/snapserver.conf|' "$SERVICE_FILE"
   fi
   if ! grep -q -- '--http-port' "$SERVICE_FILE"; then
     sed -i 's|ExecStart=.*|& --http-port 1780|' "$SERVICE_FILE"
   fi
   if [ -d "/usr/share/snapserver/snapweb" ] && ! grep -q -- '--http-doc-root' "$SERVICE_FILE"; then
     sed -i 's|ExecStart=.*|& --http-doc-root=/usr/share/snapserver/snapweb|' "$SERVICE_FILE"
+  fi
+  if ! grep -q -- '--http-doc-root' "$SERVICE_FILE"; then
+     sed -i 's|ExecStart=.*|& --http-doc-root=/usr/share/snapserver/snapweb|' "$SERVICE_FILE"
   fi
 
   mkdir -p /var/lib/snapserver/config "$SNAP_FIFO_DIR"
@@ -160,6 +163,12 @@ fix_snapserver_unit(){
   systemctl restart snapserver.service || true
   
   echo "✅ Unit adjusted. datadir=/var/lib/snapserver, configdir=/var/lib/snapserver/config, http-port=1780"
+
+  # Ensure the active config file exists and matches /etc version
+if [ -f /etc/snapserver.conf ]; then
+  cp -f /etc/snapserver.conf /var/lib/snapserver/config/snapserver.conf 2>/dev/null || true
+  chown $SNAP_USER:$SNAP_GROUP /var/lib/snapserver/config/snapserver.conf
+fi
 }
 
 monitor_snapserver(){
@@ -193,11 +202,10 @@ monitor_snapserver(){
         sleep 1
       fi
 
-      if systemctl is-active snapserver &>/dev/null; then
-        echo "✅ Automatically recovered."
-      else
-        echo "❌ Still failing. Check logs:"
-        echo "   journalctl -u snapserver -n 80 --no-pager"
+      if ! systemctl list-unit-files | grep -q '^snapserver\.service'; then
+          echo "❌ snapserver.service is not installed."
+          pause
+          return
       fi
       ;;
     *)
