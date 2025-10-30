@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.51 (Merged and Improved Build)
+# SNAPSTREAM MANAGER v2025.10.52 (Merged and Improved Build)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Installation from .deb, datadir/configdir fix, watchdog, and silent fallback.
 # Author: Josue / GPT-5 / Gemini — “No bullshit” build.
@@ -165,8 +165,9 @@ fix_snapserver_unit(){
 monitor_snapserver(){
   echo ""
   echo "🔎 Checking Snapserver status..."
-  if ! systemctl list-unit-files | grep -q snapserver.service; then
-    echo "❌ snapserver.service is not installed."
+  # Detect service existence more reliably
+  if ! systemctl status snapserver &>/dev/null; then
+    echo "❌ snapserver.service not found or not recognized by systemd."
     echo ""
     pause
     return
