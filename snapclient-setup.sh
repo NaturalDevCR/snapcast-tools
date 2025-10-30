@@ -1,14 +1,15 @@
 #!/bin/bash
 # ==============================================================================
 # setup-snapclient.sh
-# Configura Snapclient en Proxmox/LXC/Debian con ALSA fijo, passthrough,
-# asound.conf, control de volumen configurable y verificación automática.
-# Autor: Josue / GPT-5 — v2
+# Configures Snapclient on Proxmox/LXC/Debian with fixed ALSA, passthrough,
+# asound.conf, configurable volume control, and automatic verification.
+#
+# Author: Josue / GPT-5 — v3 (Enhanced by Gemini)
 # ==============================================================================
 
 set -Eeuo pipefail
 
-# === FUNCIONES AUXILIARES ====================================================
+# === HELPER FUNCTIONS =======================================================
 
 detect_environment() {
   if command -v pct >/dev/null 2>&1; then
@@ -40,154 +41,150 @@ get_suggested_snap_ver() {
   esac
 }
 
-pause(){ read -rp "Presiona Enter para continuar..."; }
+pause(){ read -rp "Press Enter to continue..."; }
 
-# === VERIFICAR PRERREQUISITOS (HOST / CONTENEDOR) ============================
+# === PREREQUISITES, MODULES, AND DIAGNOSTICS ================================
 
 check_prerequisites() {
   local ENVIRONMENT
   ENVIRONMENT=$(detect_environment)
 
   echo ""
-  echo "🔍 Verificando prerrequisitos del entorno ($ENVIRONMENT)…"
+  echo "🔍 Checking environment prerequisites ($ENVIRONMENT)…"
   echo ""
 
   local REQUIRED_PKGS=("alsa-utils" "ffmpeg" "psmisc" "wget" "curl")
 
   if [ "$ENVIRONMENT" = "proxmox" ]; then
-    # Host Proxmox
+    # Proxmox Host
     local MISSING=()
     for pkg in "${REQUIRED_PKGS[@]}"; do
       dpkg -s "$pkg" &>/dev/null || MISSING+=("$pkg")
     done
 
     if [ ${#MISSING[@]} -gt 0 ]; then
-      echo "⚠️  Faltan paquetes en el host:"
+      echo "⚠️  Missing packages on the host:"
       printf '  - %s\n' "${MISSING[@]}"
-      read -rp "¿Instalarlos ahora en el host? (Y/n): " RESP
+      read -rp "Install them now on the host? (Y/n): " RESP
       if [[ ! "$RESP" =~ ^[Nn]$ ]]; then
         apt update -qq && apt install -y "${MISSING[@]}"
       else
-        echo "⏭️  Saltando instalación en el host."
+        echo "⏭️  Skipping installation on the host."
       fi
     else
-      echo "✅ Host: prerrequisitos completos."
+      echo "✅ Host: prerequisites met."
     fi
 
-    # Verificación y carga de módulos ALSA en host
+    # Check and load ALSA modules on host
     check_alsa_modules
 
   elif [ "$ENVIRONMENT" = "lxc" ] || [ "$ENVIRONMENT" = "debian" ]; then
-    # Dentro de un contenedor o Debian suelto
+    # Inside a container or on a standalone Debian system
     local MISSING=()
     for pkg in "${REQUIRED_PKGS[@]}"; do
       dpkg -s "$pkg" &>/dev/null || MISSING+=("$pkg")
     done
 
     if [ ${#MISSING[@]} -gt 0 ]; then
-      echo "⚠️  Faltan paquetes en este sistema:"
+      echo "⚠️  Missing packages on this system:"
       printf '  - %s\n' "${MISSING[@]}"
-      read -rp "¿Instalarlos ahora? (Y/n): " RESP
+      read -rp "Install them now? (Y/n): " RESP
       if [[ ! "$RESP" =~ ^[Nn]$ ]]; then
         apt update -qq && apt install -y "${MISSING[@]}"
       else
-        echo "⏭️  Saltando instalación local."
+        echo "⏭️  Skipping local installation."
       fi
     else
-      echo "✅ Sistema: prerrequisitos completos."
+      echo "✅ System: prerequisites met."
     fi
   else
-    echo "⚠️  Entorno desconocido; no se verifican prerrequisitos."
+    echo "⚠️  Unknown environment; skipping prerequisite check."
   fi
 
   echo ""
   pause
 }
 
-# === VERIFICAR Y CARGAR MÓDULOS ALSA (HOST) ==================================
-
 check_alsa_modules() {
   echo ""
-  echo "🎧 Verificando módulos ALSA en el host…"
+  echo "🎧 Checking ALSA modules on the host…"
   echo ""
 
   local MODULES=("snd_hda_intel" "snd_usb_audio" "snd_soc_core" "snd_pcm" "snd_seq")
 
   for mod in "${MODULES[@]}"; do
     if ! lsmod | grep -q "^${mod}"; then
-      echo "⚠️  Módulo no cargado: $mod"
+      echo "⚠️  Module not loaded: $mod"
       if modinfo "$mod" &>/dev/null; then
-        read -rp "¿Cargar $mod ahora? (Y/n): " RESP
+        read -rp "Load $mod now? (Y/n): " RESP
         if [[ ! "$RESP" =~ ^[Nn]$ ]]; then
-          modprobe "$mod" && echo "✅ $mod cargado."
+          modprobe "$mod" && echo "✅ $mod loaded."
         else
-          echo "⏭️  Omitido $mod."
+          echo "⏭️  Skipped $mod."
         fi
       else
-        echo "❌ $mod no existe en este kernel."
+        echo "❌ $mod does not exist in this kernel."
       fi
     else
-      echo "✅ $mod ya cargado."
+      echo "✅ $mod already loaded."
     fi
   done
 
   echo ""
   echo "🔍 aplay -l:"
   if command -v aplay >/dev/null 2>&1; then
-    aplay -l 2>/dev/null || echo "⚠️  Sin dispositivos de reproducción detectados."
+    aplay -l 2>/dev/null || echo "⚠️  No playback devices detected."
   else
-    echo "⚠️  'aplay' no está instalado (instala alsa-utils)."
+    echo "⚠️  'aplay' is not installed (install alsa-utils)."
   fi
   echo ""
 }
 
-# === GENERAR DIAGNÓSTICO =====================================================
-
 generate_diagnostics() {
   local OUT="/root/snap-audio-check.log"
-  echo "🧾 Generando diagnóstico en $OUT …"
+  echo "🧾 Generating diagnostics report at $OUT …"
   {
     echo "═══════════════════════════════════════════════════════"
     echo " SNAPCLIENT AUDIO DIAGNOSTIC REPORT"
-    echo " Fecha: $(date)"
+    echo " Date: $(date)"
     echo " Hostname: $(hostname)"
     echo "═══════════════════════════════════════════════════════"
     echo
-    echo "🧠 Entorno: $(detect_environment)"
-    echo "📦 Debian: $(detect_debian_codename)"
+    echo "🧠 Environment: $(detect_environment)"
+    echo "📦 Debian Codename: $(detect_debian_codename)"
     echo
-    echo "🔧 Paquetes (alsa-utils, ffmpeg, wget, psmisc, curl):"
-    dpkg -l | grep -E 'alsa-utils|ffmpeg|wget|psmisc|curl' || echo "No se detectaron paquetes base"
+    echo "🔧 Packages (alsa-utils, ffmpeg, wget, psmisc, curl):"
+    dpkg -l | grep -E 'alsa-utils|ffmpeg|wget|psmisc|curl' || echo "No base packages detected"
     echo
-    echo "🎛️ Módulos ALSA (lsmod | grep snd):"
-    lsmod | grep snd || echo "No hay módulos 'snd' cargados"
+    echo "🎛️ ALSA Modules (lsmod | grep snd):"
+    lsmod | grep snd || echo "No 'snd' modules loaded"
     echo
     echo "🎧 /proc/asound/cards:"
-    cat /proc/asound/cards 2>/dev/null || echo "No hay tarjetas"
+    cat /proc/asound/cards 2>/dev/null || echo "No cards found"
     echo
     echo "🔊 aplay -l:"
     if command -v aplay >/dev/null 2>&1; then
       aplay -l 2>&1 || true
     else
-      echo "aplay no instalado."
+      echo "aplay not installed."
     fi
     echo
-    echo "🎚️ Servicio snapclient (systemctl status):"
-    systemctl status snapclient 2>&1 | head -n 30 || echo "Snapclient no instalado"
+    echo "🎚️ Snapclient Service (systemctl status):"
+    systemctl status snapclient 2>&1 | head -n 30 || echo "Snapclient not installed"
     echo
-    echo "📜 journalctl -u snapclient (últimos 30):"
+    echo "📜 journalctl -u snapclient (last 30 lines):"
     journalctl -u snapclient -n 30 --no-pager 2>&1 || true
     echo
   } > "$OUT"
-  echo "✅ Diagnóstico listo: $OUT"
+  echo "✅ Diagnostics report ready: $OUT"
   echo ""
   pause
 }
 
-# === FIJAR ORDEN DE TARJETAS ALSA (HOST) =====================================
+# === FIX ALSA CARD ORDER (HOST) =============================================
 
 fix_alsa_order() {
-  echo "🔍 Detectando tarjetas ALSA en el host…"
+  echo "🔍 Detecting ALSA cards on the host…"
   echo
 
   CARDS=()
@@ -201,21 +198,21 @@ fix_alsa_order() {
   done
 
   if [ ${#CARDS[@]} -eq 0 ]; then
-    echo "❌ No se detectaron tarjetas ALSA. Abortando."
+    echo "❌ No ALSA cards detected. Aborting."
     return
   fi
 
-  echo "🎧 Tarjetas detectadas:"
+  echo "🎧 Detected cards:"
   for i in "${!CARDS[@]}"; do
     echo "  [${CARDS[$i]}] -> ${IDS[$i]}"
   done
   echo
 
-  read -rp "👉 ¿Cuál tarjeta será la PRINCIPAL (card0)? (ej: Device o PCH): " MAIN
-  read -rp "👉 ¿Y la SECUNDARIA (card1)? (dejar en blanco si solo hay una): " SECONDARY
+  read -rp "👉 Which card will be PRIMARY (card0)? (e.g., Device or PCH): " MAIN
+  read -rp "👉 And the SECONDARY (card1)? (leave blank if only one): " SECONDARY
 
   if ! grep -q "$MAIN" /proc/asound/card*/id; then
-    echo "❌ No se encontró ninguna tarjeta con nombre '$MAIN'. Abortando."
+    echo "❌ No card found with name '$MAIN'. Aborting."
     return
   fi
 
@@ -223,23 +220,13 @@ fix_alsa_order() {
   local BACKUP_FILE="/etc/modprobe.d/alsa-base.conf.bak_$(date +%Y%m%d%H%M%S)"
   [ -f "$CONF_FILE" ] && cp "$CONF_FILE" "$BACKUP_FILE" && echo "📦 Backup: $BACKUP_FILE"
 
-  echo "🧩 Actualizando $CONF_FILE …"
+  echo "🧩 Updating $CONF_FILE …"
   {
     echo "# Generated by setup-snapclient.sh on $(date)"
   } > "$CONF_FILE"
 
-  local MOD_USB
-  local MOD_HDA
-  if lsmod | grep -q snd_usb_audio; then
-    MOD_USB="snd_usb_audio"
-  else
-    MOD_USB="snd-usb-audio"
-  fi
-  if lsmod | grep -q snd_hda_intel; then
-    MOD_HDA="snd_hda_intel"
-  else
-    MOD_HDA="snd-hda-intel"
-  fi
+  local MOD_USB="snd-usb-audio"
+  local MOD_HDA="snd-hda-intel"
 
   if [[ "$MAIN" =~ [Uu][Ss][Bb] || "$MAIN" =~ [Dd]evice ]]; then
     echo "options $MOD_USB index=0" >> "$CONF_FILE"
@@ -250,15 +237,81 @@ fix_alsa_order() {
   fi
 
   echo
-  echo "✅ Orden ALSA fijado."
+  echo "✅ ALSA order fixed."
   echo "🎯 card0 → $MAIN"
   [[ -n "$SECONDARY" ]] && echo "🎯 card1 → $SECONDARY"
   echo
-  echo "⚙️  Reinicia el host para aplicar cambios."
+  echo "⚙️  Reboot the host to apply changes."
   echo
 }
 
-# === CONFIGURAR SNAPCLIENT (HOST/PROXMOX -> CONTENEDOR o LOCAL) ==============
+# === INSTALLATION LOGIC (REFACTORED) ========================================
+
+_install_and_configure_snapclient() {
+  set -Eeuo pipefail
+  
+  # Parameters
+  local SUGGESTED_VER="$1"
+  local DEBIAN_VERSION="$2"
+  local CARD_ID="$3"
+  local ALSA_DEVICE="$4"
+  local CLIENT_NAME="$5"
+  local SNAPSERVER_IP="$6"
+  local VOLUME="$7"
+
+  echo "📦 Installing prerequisites..."
+  apt-get update -qq
+  apt-get install -yq alsa-utils psmisc ffmpeg wget
+
+  cd /tmp
+
+  local DEB_FILE="snapclient_${SUGGESTED_VER#v}-1_amd64_${DEBIAN_VERSION}.deb"
+  local CHECKSUM_FILE="${DEB_FILE}.sha256"
+  local BASE_URL="https://github.com/badaix/snapcast/releases/download/${SUGGESTED_VER}"
+
+  echo "Downloading Snapclient ${SUGGESTED_VER} for ${DEBIAN_VERSION}..."
+  wget -q "${BASE_URL}/${DEB_FILE}" -O "$DEB_FILE"
+  wget -q "${BASE_URL}/${CHECKSUM_FILE}" -O "$CHECKSUM_FILE"
+
+  echo "🛡️ Verifying package integrity..."
+  if sha256sum -c --strict --status "$CHECKSUM_FILE"; then
+    echo "✅ Checksum verified."
+  else
+    echo "❌ FATAL: Checksum verification failed! Aborting installation." >&2
+    return 1
+  fi
+  
+  echo "Installing Snapclient package..."
+  apt-get install -y "./${DEB_FILE}"
+  
+  echo "Configuring system..."
+  usermod -aG audio snapclient 2>/dev/null || true
+  
+  mkdir -p /etc
+  cat > /etc/asound.conf <<EOF
+defaults.pcm.card ${CARD_ID}
+defaults.ctl.card ${CARD_ID}
+EOF
+
+  cat > /etc/default/snapclient <<CONF
+START_SNAPCLIENT=true
+SNAPCLIENT_OPTS="--soundcard ${ALSA_DEVICE} --hostID ${CLIENT_NAME} --host ${SNAPSERVER_IP}"
+CONF
+
+  echo "Setting initial volume to ${VOLUME}%..."
+  amixer -c "$CARD_ID" sset Master "${VOLUME}%" || \
+  amixer -c "$CARD_ID" sset Speaker "${VOLUME}%" || \
+  amixer -c "$CARD_ID" sset PCM "${VOLUME}%" || \
+  echo "⚠️ Could not set volume. You may need to set it manually."
+
+  alsactl store || true
+  
+  echo "🚀 Starting Snapclient service..."
+  systemctl enable --now snapclient
+  systemctl restart snapclient
+}
+
+# === CONFIGURE SNAPCLIENT (MAIN FUNCTION) ===================================
 
 setup_snapclient() {
   local ENVIRONMENT
@@ -271,12 +324,12 @@ setup_snapclient() {
 
   if [ "$ENVIRONMENT" = "proxmox" ]; then
     echo ""
-    echo "📦 Contenedores disponibles:"
+    echo "📦 Available containers:"
     pct list | awk 'NR>1 {printf " - %s (%s)\n", $1, $2}'
     echo ""
-    read -rp "Ingrese el ID del contenedor LXC destino: " CTID
+    read -rp "Enter the target LXC container ID: " CTID
     if ! pct status "$CTID" >/dev/null 2>&1; then
-      echo "❌ El contenedor $CTID no existe."
+      echo "❌ Container $CTID does not exist."
       exit 1
     fi
     DEBIAN_VERSION=$(pct exec "$CTID" -- bash -c 'grep VERSION_CODENAME= /etc/os-release | cut -d= -f2' 2>/dev/null || echo "bookworm")
@@ -289,163 +342,120 @@ setup_snapclient() {
   SUGGESTED_VER=$(get_suggested_snap_ver "$DEBIAN_VERSION")
 
   echo ""
-  echo "📦 Sistema Debian detectado: $DEBIAN_VERSION"
-  echo "💡 Versión recomendada de Snapclient: $SUGGESTED_VER"
-  echo "🔍 Versión instalada actual: $INSTALLED_VER"
+  echo "📦 Detected Debian system: $DEBIAN_VERSION"
+  echo "💡 Recommended Snapclient version: $SUGGESTED_VER"
+  echo "🔍 Currently installed version: $INSTALLED_VER"
   echo ""
 
-  if [ "$ENVIRONMENT" = "proxmox" ]; then
-    echo "🔍 Tarjetas de audio del host:"
-    if command -v aplay >/dev/null 2>&1; then
-      aplay -l | grep '^card' || echo "⚠️ No se detectaron tarjetas ALSA."
-    else
-      echo "⚠️ 'aplay' no está instalado en el host."
-    fi
-  else
-    echo "🔍 Tarjetas locales:"
-    if command -v aplay >/dev/null 2>&1; then
-      aplay -l | grep '^card' || echo "⚠️ No se detectaron tarjetas ALSA."
-    else
-      echo "⚠️ 'aplay' no está instalado en este sistema."
-    fi
-  fi
-
+  aplay -l | grep '^card' || { echo "❌ No ALSA cards detected on this system."; exit 1; }
   echo ""
-  read -rp "Ingrese el número de tarjeta a usar (ej. 0=Interna, 1=DAC): " CARD_ID
+  read -rp "Enter the card number to use (e.g., 0=Internal, 1=DAC): " CARD_ID
 
-  echo ""
-  echo "🎧 Dispositivos disponibles en card $CARD_ID:"
-  if command -v aplay >/dev/null 2>&1; then
-    aplay -l | awk -v id=$CARD_ID '/^card/ && $2==id":" {print " - device " $6 ": " substr($0, index($0,$8))}' | sed 's/,//g' || true
-  fi
   mapfile -t DEVICE_NUMS < <(aplay -l 2>/dev/null | awk -v id=$CARD_ID '/^card/ && $2==id":" {print $6}' | sed 's/,//')
   if [ ${#DEVICE_NUMS[@]} -eq 0 ]; then
-    echo "❌ No se detectaron dispositivos ALSA para card $CARD_ID."
+    echo "❌ No ALSA devices detected for card $CARD_ID."
     exit 1
   fi
-
-   read -rp "Selecciona el número de dispositivo (ej. ${DEVICE_NUMS[0]}): " DEV_ID
+  
+  read -rp "Select the device number [default: ${DEVICE_NUMS[0]}]: " DEV_ID
   [[ -z "$DEV_ID" ]] && DEV_ID="${DEVICE_NUMS[0]}"
 
-  # === Detección robusta del nombre real de la tarjeta ALSA ===
+  # Robust detection of the real ALSA card name
   if [ -f "/proc/asound/card${CARD_ID}/id" ]; then
-    CARD_NAME=$(cat /proc/asound/card${CARD_ID}/id)
+    CARD_NAME=$(cat "/proc/asound/card${CARD_ID}/id")
   else
-    CARD_NAME=$(aplay -l 2>/dev/null | awk -v id=$CARD_ID -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
+    CARD_NAME=$(aplay -l 2>/dev/null | awk -v id="$CARD_ID" -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
   fi
 
   SAFE_CARD_NAME=$(echo "$CARD_NAME" | tr -d ' ')
   ALSA_DEVICE="plughw:CARD=$SAFE_CARD_NAME,DEV=$DEV_ID"
 
   echo ""
-  echo "✅ Tarjeta detectada correctamente:"
+  echo "✅ Card detected successfully:"
   echo "   CARD_NAME = $CARD_NAME"
   echo "   ALSA_DEVICE = $ALSA_DEVICE"
   echo ""
 
-  read -rp "Ingrese la IP del Snapserver: " SNAPSERVER_IP
-  read -rp "Ingrese el nombre del cliente Snapcast: " CLIENT_NAME
-  read -rp "🎚️ Ingrese el volumen inicial (0–100)%: " VOLUME
+  read -rp "Enter the Snapserver IP: " SNAPSERVER_IP
+  
+  # Suggest default client name
+  local DEFAULT_CLIENT_NAME
+  if [ "$ENVIRONMENT" = "proxmox" ]; then
+    DEFAULT_CLIENT_NAME=$(pct exec "$CTID" -- hostname)
+  else
+    DEFAULT_CLIENT_NAME=$(hostname)
+  fi
+  read -rp "Enter the Snapcast client name [default: $DEFAULT_CLIENT_NAME]: " CLIENT_NAME
+  [[ -z "$CLIENT_NAME" ]] && CLIENT_NAME="$DEFAULT_CLIENT_NAME"
+
+  read -rp "🎚️ Enter the initial volume (0–100)% [default: 70]: " VOLUME
+  [[ -z "$VOLUME" ]] && VOLUME="70"
 
   local CARD_DESC
-  CARD_DESC=$(aplay -l 2>/dev/null | awk -v id=$CARD_ID -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
+  CARD_DESC=$(aplay -l 2>/dev/null | awk -v id="$CARD_ID" -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
 
   echo ""
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  echo "🧾 REVISIÓN FINAL DE CONFIGURACIÓN:"
-  [[ "$ENVIRONMENT" == "proxmox" ]] && echo " Contenedor LXC:     $CTID"
-  echo " Debian:            $DEBIAN_VERSION"
-  echo " Snapclient actual: $INSTALLED_VER"
-  echo " Snapclient nuevo:  $SUGGESTED_VER"
-  echo " Tarjeta:           card $CARD_ID (${CARD_DESC:-Desconocida})"
-  echo " Dispositivo ALSA:  $ALSA_DEVICE"
+  echo "🧾 FINAL CONFIGURATION REVIEW:"
+  [[ "$ENVIRONMENT" == "proxmox" ]] && echo " LXC Container:     $CTID"
+  echo " Debian Codename:   $DEBIAN_VERSION"
+  echo " Snapclient Version: $SUGGESTED_VER"
+  echo " Card:              card $CARD_ID (${CARD_DESC:-Unknown})"
+  echo " ALSA Device:       $ALSA_DEVICE"
   echo " Snapserver IP:     $SNAPSERVER_IP"
-  echo " Nombre cliente:    $CLIENT_NAME"
-  echo " Volumen inicial:   ${VOLUME}%"
+  echo " Client Name:       $CLIENT_NAME"
+  echo " Initial Volume:    ${VOLUME}%"
   echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-  read -rp "¿Deseas aplicar esta configuración? (Y/n): " CONFIRM
-  [[ "$CONFIRM" =~ ^[Nn]$ ]] && { echo "❌ Cancelado."; return; }
+  read -rp "Do you want to apply this configuration? (Y/n): " CONFIRM
+  [[ "$CONFIRM" =~ ^[Nn]$ ]] && { echo "❌ Canceled."; return; }
 
   if [ "$ENVIRONMENT" = "proxmox" ]; then
     local CONF_FILE="/etc/pve/lxc/${CTID}.conf"
     if ! grep -q "/dev/snd" "$CONF_FILE"; then
-      echo "⚙️ Agregando passthrough de /dev/snd al contenedor $CTID…"
+      echo "⚙️ Adding /dev/snd passthrough to container $CTID…"
       cat <<EOF >> "$CONF_FILE"
 
-# === Passthrough ALSA ===
+# === ALSA Passthrough (added by setup-snapclient.sh) ===
 lxc.cgroup2.devices.allow: c 116:* rwm
 lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir
 EOF
+      echo "🔄 Rebooting container to apply passthrough..."
+      pct reboot "$CTID"
+      sleep 8 # Give it time to come back up
     fi
 
-    echo "🔄 Reiniciando contenedor…"
-    pct reboot "$CTID"
-    sleep 5
+    echo "📦 Installing and configuring Snapclient in container $CTID..."
+    # Export the function and variables, then execute inside the container
+    pct exec "$CTID" -- bash -c "$(declare -f _install_and_configure_snapclient); _install_and_configure_snapclient '$SUGGESTED_VER' '$DEBIAN_VERSION' '$CARD_ID' '$ALSA_DEVICE' '$CLIENT_NAME' '$SNAPSERVER_IP' '$VOLUME'"
 
-    echo "📦 Instalando y configurando Snapclient en el contenedor…"
-    pct exec "$CTID" -- bash -c "
-      set -Eeuo pipefail
-      apt update -qq
-      apt install -yq alsa-utils psmisc ffmpeg wget
-      cd /root
-      wget -q https://github.com/badaix/snapcast/releases/download/$SUGGESTED_VER/snapclient_${SUGGESTED_VER#v}-1_amd64_${DEBIAN_VERSION}.deb -O snapclient.deb
-      apt install -y ./snapclient.deb
-      usermod -aG audio snapclient || true
-      mkdir -p /etc
-      echo 'defaults.pcm.card $CARD_ID' > /etc/asound.conf
-      echo 'defaults.ctl.card $CARD_ID' >> /etc/asound.conf
-      cat > /etc/default/snapclient <<CONF
-START_SNAPCLIENT=true
-SNAPCLIENT_OPTS=\"--soundcard $ALSA_DEVICE --hostID $CLIENT_NAME tcp://$SNAPSERVER_IP:1704\"
-CONF
-      amixer -c $CARD_ID sset Master ${VOLUME}% || amixer -c $CARD_ID sset Speaker ${VOLUME}% || amixer -c $CARD_ID sset PCM ${VOLUME}% || true
-      alsactl store || true
-      systemctl enable snapclient
-      systemctl restart snapclient
-    "
-  else
-    echo "📦 Instalando y configurando Snapclient localmente…"
-    apt update -qq && apt install -yq alsa-utils psmisc ffmpeg wget
-    cd /root
-    wget -q https://github.com/badaix/snapcast/releases/download/$SUGGESTED_VER/snapclient_${SUGGESTED_VER#v}-1_amd64_${DEBIAN_VERSION}.deb -O snapclient.deb
-    apt install -y ./snapclient.deb
-    usermod -aG audio snapclient 2>/dev/null || true
-    mkdir -p /etc
-    echo "defaults.pcm.card $CARD_ID" > /etc/asound.conf
-    echo "defaults.ctl.card $CARD_ID" >> /etc/asound.conf
-    cat > /etc/default/snapclient <<CONF
-START_SNAPCLIENT=true
-SNAPCLIENT_OPTS="--soundcard $ALSA_DEVICE --hostID $CLIENT_NAME tcp://$SNAPSERVER_IP:1704"
-CONF
-    amixer -c $CARD_ID sset Master ${VOLUME}% || amixer -c $CARD_ID sset Speaker ${VOLUME}% || amixer -c $CARD_ID sset PCM ${VOLUME}% || true
-    alsactl store || true
-    systemctl enable snapclient
-    systemctl restart snapclient
+  else # Standalone Debian/LXC
+    echo "📦 Installing and configuring Snapclient locally…"
+    _install_and_configure_snapclient "$SUGGESTED_VER" "$DEBIAN_VERSION" "$CARD_ID" "$ALSA_DEVICE" "$CLIENT_NAME" "$SNAPSERVER_IP" "$VOLUME"
   fi
 
   verify_snapclient "$ENVIRONMENT" "${CTID:-}"
 }
 
-# === VERIFICAR CONEXIÓN SNAPCLIENT ===========================================
+# === VERIFICATION AND MENU =================================================
 
 verify_snapclient() {
   local ENV="$1"
   local CT="${2:-}"
   echo ""
-  echo "🔍 Verificando conexión Snapclient → Snapserver…"
+  echo "🔍 Verifying Snapclient → Snapserver connection (waiting 5s)..."
   sleep 5
   if [ "$ENV" = "proxmox" ] && [ -n "$CT" ]; then
-    if pct exec "$CT" -- bash -lc 'journalctl -u snapclient -n 50 --no-pager | grep -q Connected'; then
-      echo "✅ Snapclient conectado correctamente al Snapserver."
+    if pct exec "$CT" -- bash -lc 'journalctl -u snapclient -n 50 --no-pager | grep -q -E "Connected to|Stream established"'; then
+      echo "✅ Snapclient connected successfully to the Snapserver."
     else
-      echo "⚠️  No se detectó conexión. Revisa IP/puerto del Snapserver, firewall o dispositivo ALSA."
+      echo "⚠️  Connection not detected. Check Snapserver IP/port, firewall, or ALSA device."
       pct exec "$CT" -- journalctl -u snapclient -n 20 --no-pager | tail -n 20
     fi
   else
-    if journalctl -u snapclient -n 50 --no-pager | grep -q "Connected"; then
-      echo "✅ Snapclient conectado correctamente al Snapserver."
+    if journalctl -u snapclient -n 50 --no-pager | grep -q -E "Connected to|Stream established"; then
+      echo "✅ Snapclient connected successfully to the Snapserver."
     else
-      echo "⚠️  No se detectó conexión. Revisa IP/puerto del Snapserver o el dispositivo ALSA."
+      echo "⚠️  Connection not detected. Check Snapserver IP/port or ALSA device."
       journalctl -u snapclient -n 20 --no-pager | tail -n 20
     fi
   fi
@@ -453,48 +463,51 @@ verify_snapclient() {
   pause
 }
 
-# === VERIFICAR SNAPCLIENT EXISTENTE (MENÚ) ====================================
-
 verify_existing_snapclient() {
   local ENVIRONMENT
   ENVIRONMENT=$(detect_environment)
   echo ""
-  echo "🔎 Verificación de Snapclient existente…"
+  echo "🔎 Verifying existing Snapclient…"
   if [ "$ENVIRONMENT" = "proxmox" ]; then
     echo ""
-    echo "📦 Contenedores disponibles:"
+    echo "📦 Available containers:"
     pct list | awk 'NR>1 {printf " - %s (%s)\n", $1, $2}'
     echo ""
-    read -rp "Ingrese el ID del contenedor a verificar: " CTID
+    read -rp "Enter the container ID to verify: " CTID
     verify_snapclient "proxmox" "$CTID"
   else
     verify_snapclient "$ENVIRONMENT" ""
   fi
 }
 
-# === MENÚ PRINCIPAL ==========================================================
+# === MAIN MENU =============================================================
 
-clear
-echo "═══════════════════════════════════════════════════"
-echo "      🎧 SNAPCLIENT AUDIO MANAGER v2025.10.26-r3"
-echo "═══════════════════════════════════════════════════"
-echo "1️⃣  Verificar/instalar prerrequisitos"
-echo "2️⃣  Fijar orden ALSA del host"
-echo "3️⃣  Configurar Snapclient en LXC/Debian"
-echo "4️⃣  Ejecutar ambos pasos (recomendado)"
-echo "5️⃣  🔎 Verificar Snapclient existente"
-echo "6️⃣  🧾 Generar diagnóstico (snap-audio-check.log)"
-echo "7️⃣  🚪 Salir"
-echo "═══════════════════════════════════════════════════"
-read -rp "Selecciona una opción [1-7]: " opt
+main() {
+    clear
+    echo "═══════════════════════════════════════════════════"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v2025.10.29-r1"
+    echo "═══════════════════════════════════════════════════"
+    echo "1️⃣  Check prerequisites & ALSA modules (Host)"
+    echo "2️⃣  Fix host ALSA card order"
+    echo "3️⃣  Configure new Snapclient (LXC/Debian)"
+    echo "4️⃣  Run all steps (1, 2, 3)"
+    echo "---"
+    echo "5️⃣  🔎 Verify existing Snapclient"
+    echo "6️⃣  🧾 Generate diagnostics report"
+    echo "7️⃣  🚪 Exit"
+    echo "═══════════════════════════════════════════════════"
+    read -rp "Select an option [1-7]: " opt
 
-case "$opt" in
-  1) check_prerequisites ;;
-  2) check_prerequisites; fix_alsa_order ;;
-  3) check_prerequisites; setup_snapclient ;;
-  4) check_prerequisites; fix_alsa_order; setup_snapclient ;;
-  5) verify_existing_snapclient ;;
-  6) generate_diagnostics ;;
-  7) echo "👋 Saliendo…"; exit 0 ;;
-  *) echo "❌ Opción inválida."; exit 1 ;;
-esac
+    case "$opt" in
+      1) check_prerequisites ;;
+      2) check_prerequisites; fix_alsa_order ;;
+      3) check_prerequisites; setup_snapclient ;;
+      4) check_prerequisites; fix_alsa_order; setup_snapclient ;;
+      5) verify_existing_snapclient ;;
+      6) generate_diagnostics ;;
+      7) echo "👋 Exiting…"; exit 0 ;;
+      *) echo "❌ Invalid option."; exit 1 ;;
+    esac
+}
+
+main "$@"
