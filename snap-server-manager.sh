@@ -1,8 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.58 (Production Release)
+# SNAPSTREAM MANAGER v2025.10.59 (Resilient Release)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
-# Integrated advanced watchdog, log rotation, and backwards compatibility.
+# Added validation and recovery functions to prevent script crashes.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
 # Status: STABLE - Production ready.
 # ==============================================================================
@@ -583,45 +583,44 @@ ffmpeg_cmd_for(){
 }
 
 add_or_replace_stream_line(){
-    local fifo="$1" name="$2" sample="48000:16:2"
-    local tmp_conf; tmp_conf="$(mktemp)"
-    trap 'rm -f "$tmp_conf"' RETURN
+  local fifo="$1" name="$2" sample="48000:16:2"
+  local tmp_conf; tmp_conf="$(mktemp)"
+  trap 'rm -f "$tmp_conf"' RETURN
 
-    local escaped_fifo; escaped_fifo=$(escape_sed "$fifo")
-    local new_line="source = pipe:///${fifo}?name=${name}&codec=pcm&sampleformat=${sample}"
+  local new_line="source = pipe:///${fifo}?name=${name}&codec=pcm&sampleformat=${sample}"
 
-    # Atomically find [stream], remove old line matching fifo, and insert the new one.
-    awk -v old_fifo_pattern="${escaped_fifo}" \
-        -v new_line="${new_line}" '
-        BEGIN {
-            in_stream_section = 0;
-            inserted = 0;
-        }
-        /^\[stream\]/ {
-            print;
-            in_stream_section = 1;
-            next;
-        }
-        /^\[/ {
-            if (in_stream_section && !inserted) {
-                print new_line;
-                inserted = 1;
-            }
-            in_stream_section = 0;
-        }
-        in_stream_section && $0 ~ old_fifo_pattern {
-            next;
-        }
-        { print; }
-        END {
-            if (in_stream_section && !inserted) {
-                print new_line;
-            }
-        }
-    ' "$CONF_FILE" > "$tmp_conf"
+  # Atomically find [stream], remove old line matching fifo, and insert the new one.
+  awk -v fifo_path="${fifo}" \
+      -v new_line="${new_line}" '
+      BEGIN {
+          in_stream_section = 0;
+          inserted = 0;
+      }
+      /^\[stream\]/ {
+          print;
+          in_stream_section = 1;
+          next;
+      }
+      /^\[/ {
+          if (in_stream_section && !inserted) {
+              print new_line;
+              inserted = 1;
+          }
+          in_stream_section = 0;
+      }
+      in_stream_section && $0 ~ fifo_path {
+          next;
+      }
+      { print; }
+      END {
+          if (in_stream_section && !inserted) {
+              print new_line;
+          }
+      }
+  ' "$CONF_FILE" > "$tmp_conf"
 
-    mv "$tmp_conf" "$CONF_FILE"
-    chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
+  mv "$tmp_conf" "$CONF_FILE"
+  chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
 }
 
 create_stream(){
@@ -760,21 +759,41 @@ enable_watchdog_for_existing(){
     pause
     return
   fi
-  
+
   systemctl daemon-reload
-  
+
   for line in "${sources[@]}"; do
     entry="${line#*:}"
-    fifo="$(sed -E 's|.*fifo/([^?]+)\?.*|\1|' <<<"$entry")"
+    fifo="$(sed -E 's|.*pipe:///var/lib/snapserver/fifo/([^?]+)\?.*|\1|' <<<"$entry")"
     STREAM_ID="${fifo#snapfifo_}"
+
+    if [ -z "$STREAM_ID" ]; then
+        echo "⚠️  Could not parse a valid Stream ID from line: ${entry}. Skipping."
+        continue
+    fi
+
     echo "  -> Activating watchdog for stream ID: ${STREAM_ID}"
-    systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" >/dev/null 2>&1 || true
+    if ! systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" >/dev/null 2>&1; then
+        echo "  -> ⚠️  Failed to activate watchdog for ${STREAM_ID}. Check for typos in your config."
+    fi
     ((count++))
   done
   echo ""
-  echo "✅ Activated watchdog for ${count} stream(s)."
+  echo "✅ Attempted to activate watchdog for ${count} stream(s)."
   pause
 }
+
+restart_all_ffmpeg_services(){
+    echo ""
+    echo "🔁 Restarting all FFmpeg services..."
+    # Using a glob to find all services and restart them.
+    # The || true prevents the script from exiting if one of them fails.
+    systemctl restart ffmpeg-*.service || true
+    echo ""
+    echo "✅ Restart command sent to all services. Use option 5 to check their status."
+    pause
+}
+
 
 # ────────────────────────────────────────────────────────────────────────────
 # Backups (now includes watchdog and logrotate config)
@@ -854,40 +873,44 @@ main_menu(){
   ensure_silence_fallback
   ensure_watchdog_templates
   ensure_logrotate
-  monitor_snapserver
+  # 'monitor_snapserver' is too intrusive for the main loop, better to call when needed.
 
   local opt
   while true; do
+    # Get active stream count for the menu display
     local active_count
     active_count=$(systemctl list-units --type=service --state=running "ffmpeg-*.service" | grep -c . || echo "0")
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "   🧩 SNAPSTREAM MANAGER v2025.10.58 (Production Release)"
+    echo "  🧩 SNAPSTREAM MANAGER v2025.10.59 (Resilient Release)"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
-    echo "1) Add new stream (with advanced watchdog)"
-    echo "2) List streams"
-    echo "3) Edit a stream (FFmpeg service)"
+    echo "1) Add new stream"
+    echo "2) List / Check Status of streams"
+    echo "3) Edit a stream's FFmpeg service"
     echo "4) Delete stream(s)"
-    echo "5) Check status of FFmpeg services"
-    echo "6) Clients (list, name, group)"
-    echo "7) Backups (create/restore)"
-    echo "8) Activate Watchdog for existing streams"
-    echo "9) Exit"
+    echo "5) Client Management (List, Name, Group)"
+    echo "6) Backups (Create/Restore)"
+    echo "─────────────────── Maintenance ───────────────────"
+    echo "7) Activate Watchdog for existing streams"
+    echo "8) Restart all FFmpeg services"
+    echo "9) Check Snapserver Status"
+    echo "0) Exit"
     echo "═══════════════════════════════════════════════════"
-    read -rp "Choose [1-9]: " opt
+    read -rp "Choose [0-9]: " opt
     case "$opt" in
       1) create_stream;;
-      2) show_streams_numbered; pause;;
+      2) check_activity;;
       3) edit_stream;;
       4) delete_streams;;
-      5) check_activity;;
-      6) clients_menu;;
-      7) backup_menu;;
-      8) enable_watchdog_for_existing;;
-      9) exit 0;;
+      5) clients_menu;;
+      6) backup_menu;;
+      7) enable_watchdog_for_existing;;
+      8) restart_all_ffmpeg_services;;
+      9) monitor_snapserver;;
+      0) exit 0;;
       *) ;;
     esac
   done
