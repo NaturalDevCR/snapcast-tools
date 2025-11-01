@@ -1,8 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.65 (Accuracy Release)
+# SNAPSTREAM MANAGER v2025.10.65 (Final Stable Release)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
-# Improved status detection to accurately show FALLBACK/OFFLINE states.
+# Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
 # Status: STABLE - Production ready.
 # ==============================================================================
@@ -450,7 +450,7 @@ clients_menu(){
     echo "2) Auto-name by hostname"
     echo "3) Group all into → \"$DEFAULT_GROUP\""
     echo "4) Back"
-    read -rp "Choose [1-4]: " c
+    read -rp "Choose [1-4]: " c < /dev/tty
     case "$c" in
       1) list_clients ;;
       2) auto_name_clients_from_hostname ;;
@@ -659,8 +659,8 @@ create_stream(){
   echo "3) Custom FFmpeg (input arguments only)"
 
   local kind STREAM_NAME STREAM_ID FIFO_PATH SERVICE_NAME INPUT_ARGS URL FILE CUSTOM FFMPEG_LINE
-  read -rp "Choose type [1-3]: " kind
-  read -rp "Stream name: " STREAM_NAME
+  read -rp "Choose type [1-3]: " kind < /dev/tty
+  read -rp "Stream name: " STREAM_NAME < /dev/tty
   [ -z "$STREAM_NAME" ] && { echo "❌ Name is required."; pause; return; }
 
   STREAM_ID="$(mk_stream_id "$STREAM_NAME")"
@@ -669,19 +669,19 @@ create_stream(){
 
   case "$kind" in
     1)
-      read -rp "URL: " URL
+      read -rp "URL: " URL < /dev/tty
       [ -z "$URL" ] && { echo "❌ No URL provided."; pause; return; }
       INPUT_ARGS="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i \"$URL\""
       ;;
     2)
-      read -rp "Path to file (mp3/wav/flac): " FILE
+      read -rp "Path to file (mp3/wav/flac): " FILE < /dev/tty
       [ -f "$FILE" ] || { echo "❌ File not found."; pause; return; }
       INPUT_ARGS="-stream_loop -1 -re -i \"$FILE\""
       ;;
     3)
       echo "Example: -f alsa -i hw:0"
       echo "⚠️  WARNING: The arguments will be used directly in the service. Use with caution."
-      read -rp "FFmpeg input arguments: " CUSTOM
+      read -rp "FFmpeg input arguments: " CUSTOM < /dev/tty
       [ -z "$CUSTOM" ] && { echo "❌ You must provide arguments."; pause; return; }
       INPUT_ARGS="$CUSTOM"
       ;;
@@ -712,7 +712,7 @@ create_stream(){
 edit_stream(){
   show_streams_numbered || { pause; return; }
   local num entry fifo STREAM_ID SERVICE_NAME
-  read -rp "Number of the stream to edit: " num
+  read -rp "Number of the stream to edit: " num < /dev/tty
   
   local i=1
   while IFS= read -r line; do
@@ -741,7 +741,7 @@ delete_streams(){
   local -a sources
   mapfile -t sources < <(get_stream_lines)
 
-  read -rp "Number(s) to delete (comma-separated, e.g., 1,3): " sel
+  read -rp "Number(s) to delete (comma-separated, e.g., 1,3): " sel < /dev/tty
   IFS=',' read -ra CHOSEN <<<"$sel"
   for n in "${CHOSEN[@]}"; do
     entry="${sources[$((n-1))]}"
@@ -857,6 +857,41 @@ check_watchdog_status(){
   pause
 }
 
+add_timeout_to_streams(){
+    echo ""
+    echo "⚙️  Checking streams for missing 'timeout' parameter..."
+    local temp_conf; temp_conf=$(mktemp)
+    trap 'rm -f "$temp_conf"' RETURN
+    
+    local modified=0
+    # Process the file, adding timeout=5 if it's a pipe source and doesn't have it
+    awk '
+    /^\[stream\]/ {in_stream=1}
+    /^\[/ && !/^\[stream\]/ {in_stream=0}
+    in_stream && /^\s*source\s*=\s*pipe:/ && !/timeout=/ {
+        print $0 "&timeout=5";
+        modified++;
+        next;
+    }
+    {print}
+    END {
+        exit (modified > 0 ? 0 : 1)
+    }
+    ' "$CONF_FILE" > "$temp_conf"
+    
+    if [ $? -eq 0 ]; then
+        echo "✅ Found and patched streams. A backup of your old config is at ${CONF_FILE}.bak"
+        cp "$CONF_FILE" "${CONF_FILE}.bak"
+        mv "$temp_conf" "$CONF_FILE"
+        echo "🔁 Restarting Snapserver to apply changes..."
+        systemctl restart snapserver
+    else
+        echo "✅ All pipe streams already have the timeout parameter. No changes needed."
+    fi
+    pause
+}
+
+
 restart_all_ffmpeg_services(){
   echo ""
   echo "🔁 Restarting all FFmpeg services..."
@@ -872,6 +907,7 @@ restart_all_ffmpeg_services(){
 # ────────────────────────────────────────────────────────────────────────────
 # Backups
 # ────────────────────────────────────────────────────────────────────────────
+# Omitted for brevity, identical to previous version
 do_backup(){
   local OUT="/var/backups/snapserver_backup_$(ts).tar.gz"
   echo "🧯 Creating backup at $OUT ..."
@@ -888,37 +924,23 @@ do_backup(){
   echo "✅ Backup ready: $OUT"
   pause
 }
-
 do_restore(){
   local BK ans
   echo "🧰 Restore backup"
   ls -1 /var/backups/snapserver_backup_*.tar.gz 2>/dev/null || { echo "❌ No backups found in /var/backups/"; pause; return; }
-  read -rp "Path of the backup to restore: " BK
+  read -rp "Path of the backup to restore: " BK < /dev/tty
   [ -f "$BK" ] || { echo "❌ $BK does not exist"; pause; return; }
-  read -rp "⚠️  This will overwrite the current configuration. Confirm? (y/N): " ans
+  read -rp "⚠️  This will overwrite the current configuration. Confirm? (y/N): " ans < /dev/tty
   [[ "$ans" =~ ^[Yy]$ ]] || { echo "❌ Canceled"; pause; return; }
-
-  echo "⛔ Stopping services..."
-  systemctl stop snapserver snap-silence.service ffmpeg-*.service ffmpeg-watchdog@*.timer 2>/dev/null || true
-
-  echo "📦 Extracting files..."
-  tar -xzf "$BK" -C /
-
-  echo "🔧 Applying permissions and reloading..."
-  chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
-  [ -d "$LOG_DIR" ] && chown -R "$SNAP_USER:$SNAP_GROUP" "$LOG_DIR"
-  systemctl daemon-reload
-
-  echo "🟢 Restarting restored services..."
-  systemctl restart snapserver || true
+  echo "⛔ Stopping services..."; systemctl stop snapserver snap-silence.service ffmpeg-*.service ffmpeg-watchdog@*.timer 2>/dev/null || true
+  echo "📦 Extracting files..."; tar -xzf "$BK" -C /
+  echo "🔧 Applying permissions and reloading..."; chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver; [ -d "$LOG_DIR" ] && chown -R "$SNAP_USER:$SNAP_GROUP" "$LOG_DIR"; systemctl daemon-reload
+  echo "🟢 Restarting restored services..."; systemctl restart snapserver || true
   if compgen -G "$SYSTEMD_DIR/ffmpeg-*.service" > /dev/null; then systemctl restart ffmpeg-*.service; fi
   if compgen -G "$SYSTEMD_DIR/ffmpeg-watchdog@*.timer" > /dev/null; then systemctl start ffmpeg-watchdog@*.timer; fi
   if [ -f "$SYSTEMD_DIR/snap-silence.service" ]; then systemctl restart snap-silence.service; fi
-
-  echo "✅ Restored."
-  pause
+  echo "✅ Restored."; pause
 }
-
 backup_menu(){
   local b
   while true; do
@@ -927,7 +949,7 @@ backup_menu(){
     echo "1) Create backup"
     echo "2) Restore backup"
     echo "3) Back"
-    read -rp "Choose [1-3]: " b
+    read -rp "Choose [1-3]: " b < /dev/tty
     case "$b" in
       1) do_backup ;;
       2) do_restore ;;
@@ -957,24 +979,27 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v2025.10.64 (Critical Fix Release)"
+    echo "  🧩 SNAPSTREAM MANAGER v2025.10.65 (Final Stable Release)"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
+    echo "         ─── Stream Management ───"
     echo "1) Add new stream"
     echo "2) List / Check Status of streams"
     echo "3) Edit a stream's FFmpeg service"
     echo "4) Delete stream(s)"
-    echo "5) Client Management (List, Name, Group)"
+    echo "         ─── System & Clients ───"
+    echo "5) Client Management"
     echo "6) Backups (Create/Restore)"
-    echo "─────────────────── Maintenance ───────────────────"
+    echo "S) Check Snapserver Status"
+    echo "         ─── Maintenance ───"
     echo "7) Activate Watchdog for all streams"
     echo "8) Check Watchdog status"
     echo "9) Restart all FFmpeg services"
-    echo "S) Check Snapserver Status"
+    echo "T) Add Timeout parameter to streams (for fallback)"
     echo "0) Exit"
     echo "═══════════════════════════════════════════════════"
-    read -rp "Choose an option: " opt
+    read -rp "Choose an option: " opt < /dev/tty
     case "$opt" in
       1) create_stream;;
       2) check_activity;;
@@ -986,6 +1011,7 @@ main_menu(){
       8) check_watchdog_status;;
       9) restart_all_ffmpeg_services;;
       S|s) monitor_snapserver;;
+      T|t) add_timeout_to_streams;;
       0) exit 0;;
       *) ;;
     esac
