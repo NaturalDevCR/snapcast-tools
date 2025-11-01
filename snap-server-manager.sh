@@ -1,8 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.63 (Visibility & Fixes Release)
+# SNAPSTREAM MANAGER v2025.10.64 (Critical Fix Release)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
-# Fixed client RPC, improved fallback check, added source monitoring.
+# Fixed critical config parsing and silent RPC failures.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
 # Status: STABLE - Production ready.
 # ==============================================================================
@@ -291,7 +291,6 @@ ensure_silence_fallback(){
   fi
 
   mkdir -p "$SNAP_FIFO_DIR"
-  # --- IMPROVED: Only recreate FIFO if it's missing or has wrong owner ---
   local recreate_fifo=0
   if [ ! -p "$SILENCE_FIFO" ]; then
       recreate_fifo=1
@@ -362,13 +361,40 @@ EOF
 # ────────────────────────────────────────────────────────────────────────────
 # JSON-RPC: Client Management
 # ────────────────────────────────────────────────────────────────────────────
-rpc(){ curl -s -H 'Content-Type: application/json' -X POST "$SNAP_RPC" -d "$1"; }
+rpc(){
+    local response error_message
+    # Use --fail to make curl return an error code on HTTP errors (like 404)
+    # Capture stderr to a variable to show it if needed
+    response=$(curl --fail -s --connect-timeout 5 -H 'Content-Type: application/json' -X POST "$SNAP_RPC" -d "$1" 2> >(error_message=$(cat); echo "$error_message" >&2))
+    if [ $? -ne 0 ]; then
+        # On error, print a helpful message and return an error code
+        echo "RPC_ERROR: Failed to communicate with Snapserver on ${SNAP_RPC}." >&2
+        if [ -n "$error_message" ]; then
+            echo "curl error: ${error_message}" >&2
+        fi
+        return 1
+    fi
+    echo "$response"
+}
 rpc_status(){ rpc '{"id":1,"jsonrpc":"2.0","method":"Server.GetStatus"}'; }
 
 list_clients(){
   echo ""
   echo "👥 Connected clients:"
-  rpc_status | jq -r '.result.server.clients[]? | "  • ID: \(.id)\n    Host: \(.host.name)\n    Name: \(.config.name)"' || echo "❌ No clients found or server is not responding."
+  local response
+  if ! response=$(rpc_status); then
+      echo "❌ Error communicating with Snapserver. Is the service running and is port 1780 open?"
+      pause
+      return
+  fi
+  
+  local count
+  count=$(echo "$response" | jq '.result.server.clients | length')
+  if [ "$count" -eq 0 ]; then
+    echo "ℹ️ No clients are currently connected."
+  else
+    echo "$response" | jq -r '.result.server.clients[] | "  • ID: \(.id)\n    Host: \(.host.name)\n    Name: \(.config.name)\n"'
+  fi
   echo ""
   pause
 }
@@ -376,9 +402,15 @@ list_clients(){
 auto_name_clients_from_hostname(){
   echo ""
   echo "✏️ Auto-naming clients using their hostname..."
-  local js ids id host name
-  js="$(rpc_status || true)"
-  [ -z "$js" ] && { echo "❌ JSON-RPC not available."; pause; return; }
+  local response js
+  if ! response=$(rpc_status); then
+      echo "❌ Error communicating with Snapserver."
+      pause
+      return
+  fi
+  js="$response"
+  
+  local ids id host name
   ids=($(echo "$js" | jq -r '.result.server.clients[].id'))
   for id in "${ids[@]}"; do
     host="$(echo "$js" | jq -r ".result.server.clients[] | select(.id==\"$id\") | (.host.name // .host.address // \"client\")")"
@@ -395,9 +427,15 @@ auto_name_clients_from_hostname(){
 group_all_clients_default(){
   echo ""
   echo "🧩 Grouping all clients into \"$DEFAULT_GROUP\"…"
-  local js ids client_ids_json
-  js="$(rpc_status || true)"
-  [ -z "$js" ] && { echo "❌ JSON-RPC not available."; pause; return; }
+  local response js
+  if ! response=$(rpc_status); then
+      echo "❌ Error communicating with Snapserver."
+      pause
+      return
+  fi
+  js="$response"
+  
+  local ids client_ids_json
   ids=($(echo "$js" | jq -r '.result.server.clients[].id'))
   client_ids_json=$(printf '%s\n' "${ids[@]}" | jq -R . | jq -s .)
   rpc "$(jq -n --argjson ids "$client_ids_json" --arg grp "$DEFAULT_GROUP" '{id:3,"jsonrpc":"2.0","method":"Group.SetClients","params":{"id":$grp,"clients":$ids}}')" > /dev/null
@@ -430,7 +468,8 @@ clients_menu(){
 # Stream Management with FFmpeg & Advanced Watchdog
 # ────────────────────────────────────────────────────────────────────────────
 get_stream_lines(){
-  awk '/^\[stream\]/{f=1;next} /^\[/{f=0} f && /^\s*source\s*=/' "$CONF_FILE" 2>/dev/null || true
+  # Robust way to get 'source' lines only from within the [stream] section
+  sed -n '/^\[stream\]/,/^\[/p' "$CONF_FILE" | grep '^\s*source\s*='
 }
 
 show_streams_numbered(){
@@ -509,16 +548,12 @@ ExecStart=/bin/bash -c '\
   FIFO="/var/lib/snapserver/fifo/snapfifo_${INSTANCE}"; \
   REASON=""; \
   \
-  # Check 1: Service is dead
   if ! systemctl is-active --quiet "${UNIT}"; then \
     REASON="service was not active"; \
-  # Check 2: FIFO pipe is missing
   elif [ ! -p "${FIFO}" ]; then \
     REASON="FIFO pipe was missing"; \
-  # Check 3: Known error patterns in recent log history
   elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q "(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"; then \
     REASON="detected critical error pattern in logs"; \
-  # Check 4: Process is stuck (log file not updated recently)
   elif [ -f "${LOG}" ]; then \
     LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) )); \
     if [[ "${LAST_UPDATE}" -gt 90 ]]; then \
@@ -706,11 +741,11 @@ edit_stream(){
 delete_streams(){
   show_streams_numbered || { pause; return; }
   local sel CHOSEN n entry STREAM_ID SVC LOG_FILE
-  read -rp "Number(s) to delete (comma-separated, e.g., 1,3): " sel
   
   local -a sources
   mapfile -t sources < <(get_stream_lines)
 
+  read -rp "Number(s) to delete (comma-separated, e.g., 1,3): " sel
   IFS=',' read -ra CHOSEN <<<"$sel"
   for n in "${CHOSEN[@]}"; do
     entry="${sources[$((n-1))]}"
@@ -737,7 +772,10 @@ check_activity(){
   echo ""
   echo "🎧 Current status of FFmpeg services:"
   local server_status
-  server_status=$(rpc_status)
+  if ! server_status=$(rpc_status); then
+      echo "⚠️  Could not connect to Snapserver to check stream sources. Displaying service status only."
+      server_status=""
+  fi
   
   local i=1
   while IFS= read -r line; do
@@ -747,26 +785,25 @@ check_activity(){
     svc=$(service_name_for "$id")
     st=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
     
-    # Check current source from Snapserver API
-    local current_uri
-    current_uri=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .uri.path')
-    
-    if [[ "$current_uri" == *"/silence.fifo" ]]; then
-        source_status="FALLBACK"
-    elif [ -n "$current_uri" ]; then
-        source_status="MAIN"
-    else
-        source_status="-"
+    source_status="-"
+    if [ -n "$server_status" ]; then
+        local current_uri
+        current_uri=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .uri.path')
+        if [[ "$current_uri" == *"/silence.fifo" ]]; then
+            source_status="FALLBACK"
+        elif [ -n "$current_uri" ]; then
+            source_status="MAIN"
+        fi
     fi
 
-    printf "  • %-22s | Service: %-10s | Source: %-8s (%s)\n" "'$name'" "$st" "$source_status" "$svc"
+    printf "  • %-22s | Service: %-10s | Source: %-8s\n" "'$name'" "$st" "$source_status"
     ((i++))
   done < <(get_stream_lines)
+
   if [ "$i" -eq 1 ]; then echo "No streams configured."; fi
   
   echo ""
-  echo "🔎 To see logs for a specific stream, run:"
-  echo "   tail -f /var/log/ffmpeg/ffmpeg-<stream_id>.log"
+  echo "🔎 To see logs, run: tail -f /var/log/ffmpeg/ffmpeg-<stream_id>.log"
   echo ""
   pause
 }
@@ -778,7 +815,6 @@ enable_watchdog_for_existing(){
   
   systemctl daemon-reload
 
-  # Use a while read loop to avoid issues with mapfile/read
   while IFS= read -r line; do
     local STREAM_ID
     STREAM_ID=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
@@ -805,23 +841,22 @@ enable_watchdog_for_existing(){
 }
 
 check_watchdog_status(){
-    echo ""
-    echo "🛡️  Current status of Watchdog timers:"
-    local i=1
-    while IFS= read -r line; do
-        local name id timer_service st
-        name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
-        id=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
-        timer_service="ffmpeg-watchdog@${id}.timer"
-        st=$(systemctl is-active "$timer_service" 2>/dev/null || echo "inactive")
-        printf "  • %-22s : %-10s (%s)\n" "'$name'" "$st" "$timer_service"
-        ((i++))
-    done < <(get_stream_lines)
-    if [ "$i" -eq 1 ]; then echo "No streams configured to check."; fi
-    echo ""
-    pause
+  echo ""
+  echo "🛡️  Current status of Watchdog timers:"
+  local i=1
+  while IFS= read -r line; do
+    local name id timer_service st
+    name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
+    id=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+    timer_service="ffmpeg-watchdog@${id}.timer"
+    st=$(systemctl is-active "$timer_service" 2>/dev/null || echo "inactive")
+    printf "  • %-22s : %-10s (%s)\n" "'$name'" "$st" "$timer_service"
+    ((i++))
+  done < <(get_stream_lines)
+  if [ "$i" -eq 1 ]; then echo "No streams configured to check."; fi
+  echo ""
+  pause
 }
-
 
 restart_all_ffmpeg_services(){
   echo ""
@@ -907,7 +942,6 @@ backup_menu(){
 # Main Menu
 # ────────────────────────────────────────────────────────────────────────────
 main_menu(){
-  # Remove the global rollback trap that can cause instability
   trap - ERR
 
   ensure_prereqs
@@ -924,7 +958,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v2025.10.63 (Final Release)"
+    echo "  🧩 SNAPSTREAM MANAGER v2025.10.64 (Critical Fix Release)"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
