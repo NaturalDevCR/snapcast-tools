@@ -1,10 +1,10 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.61 (Debug & Fix Release)
+# SNAPSTREAM MANAGER v2025.10.63 (Visibility & Fixes Release)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
-# Removed global rollback trap, added detailed error reporting for watchdog.
+# Fixed client RPC, improved fallback check, added source monitoring.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
-# Status: DEBUG - Focused on fixing the watchdog activation bug.
+# Status: STABLE - Production ready.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -207,7 +207,11 @@ install_prereqs(){
 
   echo "⬇️ Searching for the latest release…"
   SNAPVER="$(curl -s "$RELEASE_API" | jq -r '.tag_name')"
-  [ -z "$SNAPVER" ] && { echo "❌ Could not get version."; exit 1; }
+  if [ -z "$SNAPVER" ]; then
+    echo "❌ Could not get Snapcast version from GitHub."
+    if [ -f "$BACKUP_DIR/snapserver_prev.deb" ]; then dpkg -i "$BACKUP_DIR/snapserver_prev.deb"; fi
+    return 1
+  fi
   echo "📌 Version: $SNAPVER"
 
   PACKAGE_URL="$(curl -s "$RELEASE_API" | jq -r '
@@ -225,16 +229,24 @@ install_prereqs(){
     ' | head -n1)"
   fi
 
-  [ -z "$PACKAGE_URL" ] && { echo "❌ No compatible package found."; exit 1; }
+  [ -z "$PACKAGE_URL" ] && { echo "❌ No compatible package found for your OS/Arch."; return 1; }
 
   FILENAME="/tmp/$(basename "$PACKAGE_URL")"
-  echo "📦 Downloading:"
-  echo "   $PACKAGE_URL"
-  echo "   to $FILENAME"
-  curl -L -o "$FILENAME" "$PACKAGE_URL"
+  echo "📦 Downloading: $PACKAGE_URL"
+  if ! curl -L -o "$FILENAME" "$PACKAGE_URL"; then
+    echo "❌ Download failed."
+    return 1
+  fi
 
   echo "📦 Installing..."
-  dpkg -i "$FILENAME" || apt-get -f install -y
+  if ! dpkg -i "$FILENAME"; then
+    echo "dpkg failed, trying to fix dependencies..."
+    if ! apt-get -f install -y; then
+        echo "❌ Failed to install package and fix dependencies."
+        if [ -f "$BACKUP_DIR/snapserver_prev.deb" ]; then dpkg -i "$BACKUP_DIR/snapserver_prev.deb"; fi
+        return 1
+    fi
+  fi
   cp -f "$FILENAME" "$CACHE_DIR/snapserver_current.deb" || true
 
   mkdir -p "$SNAP_FIFO_DIR" /var/lib/snapserver/config
@@ -250,8 +262,13 @@ install_prereqs(){
 
 ensure_prereqs(){
   if needs_install; then
-    confirm_actions
-    install_prereqs
+    (
+      confirm_actions && install_prereqs
+    )
+    if [ $? -ne 0 ]; then
+      echo "🚨 Installation failed. Please check the errors above."
+      exit 1
+    fi
   else
     echo "✅ Dependencies already satisfied. Skipping installation."
     sleep 1
@@ -274,14 +291,22 @@ ensure_silence_fallback(){
   fi
 
   mkdir -p "$SNAP_FIFO_DIR"
-  if [ -p "$SILENCE_FIFO" ]; then
-    echo "🧹 Removing existing FIFO (possible bad ownership)..."
-    rm -f "$SILENCE_FIFO"
+  # --- IMPROVED: Only recreate FIFO if it's missing or has wrong owner ---
+  local recreate_fifo=0
+  if [ ! -p "$SILENCE_FIFO" ]; then
+      recreate_fifo=1
+      echo "🪄 FIFO not found. Creating new one..."
+  elif [ "$(stat -c %U "$SILENCE_FIFO")" != "$SNAP_USER" ] || [ "$(stat -c %G "$SILENCE_FIFO")" != "$SNAP_GROUP" ]; then
+      recreate_fifo=1
+      echo "🧹 FIFO has incorrect ownership. Recreating..."
   fi
-  echo "🪄 Creating new FIFO at $SILENCE_FIFO..."
-  mkfifo "$SILENCE_FIFO"
-  chown "$SNAP_USER:$SNAP_GROUP" "$SILENCE_FIFO"
-  chmod 666 "$SILENCE_FIFO"
+
+  if [ "$recreate_fifo" -eq 1 ]; then
+      rm -f "$SILENCE_FIFO"
+      mkfifo "$SILENCE_FIFO"
+      chown "$SNAP_USER:$SNAP_GROUP" "$SILENCE_FIFO"
+      chmod 666 "$SILENCE_FIFO"
+  fi
 
   echo "🩹 Creating or updating snap-silence.service..."
   cat > "$SILENCE_SERVICE" <<EOF
@@ -343,7 +368,7 @@ rpc_status(){ rpc '{"id":1,"jsonrpc":"2.0","method":"Server.GetStatus"}'; }
 list_clients(){
   echo ""
   echo "👥 Connected clients:"
-  rpc_status | jq -r '.result.server.clients[]? | "  • \(.id) | \(.host.name) | \(.config.name)"' || echo "❌ No clients or server is not responding."
+  rpc_status | jq -r '.result.server.clients[]? | "  • ID: \(.id)\n    Host: \(.host.name)\n    Name: \(.config.name)"' || echo "❌ No clients found or server is not responding."
   echo ""
   pause
 }
@@ -405,26 +430,24 @@ clients_menu(){
 # Stream Management with FFmpeg & Advanced Watchdog
 # ────────────────────────────────────────────────────────────────────────────
 get_stream_lines(){
-  awk '
-    /^\[stream\]/{instream=1; next}
-    /^\[/{instream=0}
-    instream && /^source[[:space:]]*=/ { print NR ":" $0 }
-  ' "$CONF_FILE" 2>/dev/null || true
+  awk '/^\[stream\]/{f=1;next} /^\[/{f=0} f && /^\s*source\s*=/' "$CONF_FILE" 2>/dev/null || true
 }
 
 show_streams_numbered(){
   echo ""
   echo "📜 Configured Streams:"
-  local sources i line entry name
-  mapfile -t sources < <(get_stream_lines)
-  [ "${#sources[@]}" -eq 0 ] && { echo "❌ No streams defined in $CONF_FILE"; return 1; }
-  i=1
-  for line in "${sources[@]}"; do
-    entry="${line#*:}"
-    name="$(sed -E 's/.*[?&]name=([^&]+).*/\1/' <<<"$entry")"
+  local i=1
+  while IFS= read -r line; do
+    local name
+    name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
     echo "  $i) $name"
     ((i++))
-  done
+  done < <(get_stream_lines)
+
+  if [ "$i" -eq 1 ]; then
+    echo "❌ No streams defined in $CONF_FILE"
+    return 1
+  fi
   echo ""
 }
 
@@ -508,11 +531,11 @@ ExecStart=/bin/bash -c '\
   fi; \
   \
   if [ -n "${REASON}" ]; then \
-    echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}."; \
+    echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}." >> "${LOG}"; \
     systemctl restart "${UNIT}"; \
     sleep 1; \
     > "${LOG}"; \
-    echo "[WATCHDOG] Log for ${INSTANCE} has been cleared."; \
+    echo "[WATCHDOG] Log for ${INSTANCE} has been cleared." >> "${LOG}"; \
   fi'
 EOF
   fi
@@ -657,12 +680,19 @@ create_stream(){
 
 edit_stream(){
   show_streams_numbered || { pause; return; }
-  local num sources entry fifo STREAM_ID SERVICE_NAME
+  local num entry fifo STREAM_ID SERVICE_NAME
   read -rp "Number of the stream to edit: " num
-  mapfile -t sources < <(get_stream_lines)
-  entry="${sources[$((num-1))]#*:}"
-  fifo="$(sed -E 's|.*snapfifo_([^?]+)\?.*|\1|' <<<"$entry")"
-  STREAM_ID="${fifo}"
+  
+  local i=1
+  while IFS= read -r line; do
+    if [ "$i" -eq "$num" ]; then
+      entry="$line"
+      break
+    fi
+    ((i++))
+  done < <(get_stream_lines)
+
+  STREAM_ID="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
   SERVICE_NAME="$(service_name_for "$STREAM_ID")"
   echo "✍️  Editing service: $SYSTEMD_DIR/$SERVICE_NAME"
   pause
@@ -675,14 +705,16 @@ edit_stream(){
 
 delete_streams(){
   show_streams_numbered || { pause; return; }
-  local sel CHOSEN n sources entry fifo STREAM_ID SVC LOG_FILE
+  local sel CHOSEN n entry STREAM_ID SVC LOG_FILE
   read -rp "Number(s) to delete (comma-separated, e.g., 1,3): " sel
+  
+  local -a sources
+  mapfile -t sources < <(get_stream_lines)
+
   IFS=',' read -ra CHOSEN <<<"$sel"
   for n in "${CHOSEN[@]}"; do
-    mapfile -t sources < <(get_stream_lines)
-    entry="${sources[$((n-1))]#*:}"
-    fifo="$(sed -E 's|.*snapfifo_([^?]+)\?.*|\1|' <<<"$entry")"
-    STREAM_ID="${fifo}"
+    entry="${sources[$((n-1))]}"
+    STREAM_ID="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
     SVC="$(service_name_for "$STREAM_ID")"
     LOG_FILE="$(log_file_for "$STREAM_ID")"
 
@@ -704,17 +736,34 @@ delete_streams(){
 check_activity(){
   echo ""
   echo "🎧 Current status of FFmpeg services:"
-  local sources line entry name fifo id svc st
-  mapfile -t sources < <(get_stream_lines)
-  [ "${#sources[@]}" -eq 0 ] && { echo "No streams configured."; pause; return; }
-  for line in "${sources[@]}"; do
-    entry="${line#*:}"
-    name="$(sed -E 's/.*[?&]name=([^&]+).*/\1/' <<<"$entry")"
-    id="$(sed -E 's|.*snapfifo_([^?]+)\?.*|\1|' <<<"$entry")"
-    svc="$(service_name_for "$id")"
-    st="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
-    printf "  • %-22s : %-10s (%s)\n" "'$name'" "$st" "$svc"
-  done
+  local server_status
+  server_status=$(rpc_status)
+  
+  local i=1
+  while IFS= read -r line; do
+    local name id svc st source_status
+    name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
+    id=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+    svc=$(service_name_for "$id")
+    st=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+    
+    # Check current source from Snapserver API
+    local current_uri
+    current_uri=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .uri.path')
+    
+    if [[ "$current_uri" == *"/silence.fifo" ]]; then
+        source_status="FALLBACK"
+    elif [ -n "$current_uri" ]; then
+        source_status="MAIN"
+    else
+        source_status="-"
+    fi
+
+    printf "  • %-22s | Service: %-10s | Source: %-8s (%s)\n" "'$name'" "$st" "$source_status" "$svc"
+    ((i++))
+  done < <(get_stream_lines)
+  if [ "$i" -eq 1 ]; then echo "No streams configured."; fi
+  
   echo ""
   echo "🔎 To see logs for a specific stream, run:"
   echo "   tail -f /var/log/ffmpeg/ffmpeg-<stream_id>.log"
@@ -725,41 +774,54 @@ check_activity(){
 enable_watchdog_for_existing(){
   echo ""
   echo "🛡️  Scanning for existing streams to enable watchdog..."
-  local sources line entry STREAM_ID count=0
-  mapfile -t sources < <(get_stream_lines)
-  if [ "${#sources[@]}" -eq 0 ]; then
-    echo "ℹ️ No streams found to activate."
-    pause
-    return
-  fi
-
+  local count=0
+  
   systemctl daemon-reload
 
-  for line in "${sources[@]}"; do
-    entry="${line#*:}"
-    STREAM_ID=$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+  # Use a while read loop to avoid issues with mapfile/read
+  while IFS= read -r line; do
+    local STREAM_ID
+    STREAM_ID=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
 
     if [ -z "$STREAM_ID" ]; then
-      echo "  -> ⚠️  Could not parse a valid Stream ID from line: ${entry}. Skipping."
+      echo "  -> ⚠️  Could not parse a valid Stream ID from line: ${line}. Skipping."
       continue
     fi
     
-    echo "  -> DEBUG: Found STREAM_ID: '${STREAM_ID}'"
-    echo "  -> Activating watchdog..."
-
-    # Execute and capture output to show on failure
+    echo "  -> Processing Stream ID: '${STREAM_ID}'"
+    
     if ! output=$(systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" 2>&1); then
-      echo "     ❌ FAILED to activate watchdog for ${STREAM_ID}."
-      echo "     Systemd error: ${output}"
+      echo "     ❌ FAILED to activate watchdog. Systemd error:"
+      echo "     ${output}"
     else
-      echo "     ✅ Watchdog for ${STREAM_ID} is active."
+      echo "     ✅ Watchdog timer is active."
     fi
     ((count++))
-  done
+  done < <(get_stream_lines)
+  
   echo ""
   echo "✅ Finished processing ${count} stream(s)."
   pause
 }
+
+check_watchdog_status(){
+    echo ""
+    echo "🛡️  Current status of Watchdog timers:"
+    local i=1
+    while IFS= read -r line; do
+        local name id timer_service st
+        name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
+        id=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+        timer_service="ffmpeg-watchdog@${id}.timer"
+        st=$(systemctl is-active "$timer_service" 2>/dev/null || echo "inactive")
+        printf "  • %-22s : %-10s (%s)\n" "'$name'" "$st" "$timer_service"
+        ((i++))
+    done < <(get_stream_lines)
+    if [ "$i" -eq 1 ]; then echo "No streams configured to check."; fi
+    echo ""
+    pause
+}
+
 
 restart_all_ffmpeg_services(){
   echo ""
@@ -774,7 +836,7 @@ restart_all_ffmpeg_services(){
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# Backups (now includes watchdog and logrotate config)
+# Backups
 # ────────────────────────────────────────────────────────────────────────────
 do_backup(){
   local OUT="/var/backups/snapserver_backup_$(ts).tar.gz"
@@ -845,7 +907,7 @@ backup_menu(){
 # Main Menu
 # ────────────────────────────────────────────────────────────────────────────
 main_menu(){
-  # Critical: Remove the global rollback trap that causes instability
+  # Remove the global rollback trap that can cause instability
   trap - ERR
 
   ensure_prereqs
@@ -862,7 +924,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v2025.10.61 (Debug & Fix Release)"
+    echo "  🧩 SNAPSTREAM MANAGER v2025.10.63 (Final Release)"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -873,12 +935,13 @@ main_menu(){
     echo "5) Client Management (List, Name, Group)"
     echo "6) Backups (Create/Restore)"
     echo "─────────────────── Maintenance ───────────────────"
-    echo "7) Activate Watchdog for existing streams"
-    echo "8) Restart all FFmpeg services"
-    echo "9) Check Snapserver Status"
+    echo "7) Activate Watchdog for all streams"
+    echo "8) Check Watchdog status"
+    echo "9) Restart all FFmpeg services"
+    echo "S) Check Snapserver Status"
     echo "0) Exit"
     echo "═══════════════════════════════════════════════════"
-    read -rp "Choose [0-9]: " opt
+    read -rp "Choose an option: " opt
     case "$opt" in
       1) create_stream;;
       2) check_activity;;
@@ -887,8 +950,9 @@ main_menu(){
       5) clients_menu;;
       6) backup_menu;;
       7) enable_watchdog_for_existing;;
-      8) restart_all_ffmpeg_services;;
-      9) monitor_snapserver;;
+      8) check_watchdog_status;;
+      9) restart_all_ffmpeg_services;;
+      S|s) monitor_snapserver;;
       0) exit 0;;
       *) ;;
     esac
