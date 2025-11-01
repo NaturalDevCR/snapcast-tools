@@ -1,10 +1,10 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.60 (Hotfix Release)
+# SNAPSTREAM MANAGER v2025.10.61 (Debug & Fix Release)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
-# Fixed critical parsing bug in watchdog activation and improved resiliency.
+# Removed global rollback trap, added detailed error reporting for watchdog.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
-# Status: STABLE - Production ready.
+# Status: DEBUG - Focused on fixing the watchdog activation bug.
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -38,31 +38,6 @@ chown "$SNAP_USER:$SNAP_GROUP" "$LOG_DIR"
 pause(){ read -rp "Press Enter to continue..."; }
 ts(){ date +"%Y-%m-%d_%H-%M-%S"; }
 escape_sed(){ sed -e 's/[\/&]/\\&/g' <<<"$1"; }
-
-# --- Rollback in case of error ---
-rollback(){
-  echo "⚠️  ERROR: executing ROLLBACK…"
-  if systemctl list-unit-files | grep -q snapserver.service; then
-    systemctl stop snapserver 2>/dev/null || true
-  fi
-  if [ -f "$BACKUP_DIR/snapserver_prev.deb" ]; then
-    echo "↩️  Restoring previous package…"
-    dpkg -i "$BACKUP_DIR/snapserver_prev.deb" || true
-  else
-    echo "ℹ️  No previous snapserver package found. Nothing to restore."
-  fi
-  if [ -f "$BACKUP_DIR/snapserver.conf.prev" ]; then
-    echo "↩️  Restoring previous configuration…"
-    cp -f "$BACKUP_DIR/snapserver.conf.prev" "$CONF_FILE"
-  fi
-  systemctl daemon-reload || true
-  if systemctl list-unit-files | grep -q snapserver.service; then
-    systemctl restart snapserver || true
-  fi
-  echo "✅ Rollback complete."
-  exit 1
-}
-trap rollback ERR
 
 # ────────────────────────────────────────────────────────────────────────────
 # LXC Detection and Help
@@ -706,7 +681,6 @@ delete_streams(){
   for n in "${CHOSEN[@]}"; do
     mapfile -t sources < <(get_stream_lines)
     entry="${sources[$((n-1))]#*:}"
-    # Use the more robust regex to extract the ID
     fifo="$(sed -E 's|.*snapfifo_([^?]+)\?.*|\1|' <<<"$entry")"
     STREAM_ID="${fifo}"
     SVC="$(service_name_for "$STREAM_ID")"
@@ -763,33 +737,37 @@ enable_watchdog_for_existing(){
 
   for line in "${sources[@]}"; do
     entry="${line#*:}"
-    # Use a robust regex that finds 'snapfifo_' and captures until '?'
     STREAM_ID=$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
 
     if [ -z "$STREAM_ID" ]; then
       echo "  -> ⚠️  Could not parse a valid Stream ID from line: ${entry}. Skipping."
       continue
     fi
+    
+    echo "  -> DEBUG: Found STREAM_ID: '${STREAM_ID}'"
+    echo "  -> Activating watchdog..."
 
-    echo "  -> Activating watchdog for stream ID: ${STREAM_ID}"
-    if ! systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" >/dev/null 2>&1; then
-      echo "  -> ⚠️  Failed to activate watchdog for ${STREAM_ID}. The service template might be missing or invalid."
+    # Execute and capture output to show on failure
+    if ! output=$(systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" 2>&1); then
+      echo "     ❌ FAILED to activate watchdog for ${STREAM_ID}."
+      echo "     Systemd error: ${output}"
+    else
+      echo "     ✅ Watchdog for ${STREAM_ID} is active."
     fi
     ((count++))
   done
   echo ""
-  echo "✅ Attempted to activate watchdog for ${count} stream(s)."
+  echo "✅ Finished processing ${count} stream(s)."
   pause
 }
 
 restart_all_ffmpeg_services(){
   echo ""
   echo "🔁 Restarting all FFmpeg services..."
-  # Use a glob to find all services. || true prevents script exit on failure of one.
   if ! systemctl restart ffmpeg-*.service; then
-      echo "⚠️  Some services failed to restart. Use option 2 to check status."
+      echo "⚠️  Some services may have failed to restart. Use option 2 to check status."
   else
-      echo "✅ Restart command sent successfully."
+      echo "✅ Restart command sent successfully to all ffmpeg services."
   fi
   echo ""
   pause
@@ -867,6 +845,9 @@ backup_menu(){
 # Main Menu
 # ────────────────────────────────────────────────────────────────────────────
 main_menu(){
+  # Critical: Remove the global rollback trap that causes instability
+  trap - ERR
+
   ensure_prereqs
   detect_lxc
   [[ "$LXC_MODE" -eq 1 ]] && lxc_instructions
@@ -881,7 +862,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v2025.10.60 (Hotfix Release)"
+    echo "  🧩 SNAPSTREAM MANAGER v2025.10.61 (Debug & Fix Release)"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
