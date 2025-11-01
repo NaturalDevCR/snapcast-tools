@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.54 (Merged and Improved Build)
+# SNAPSTREAM MANAGER v2025.10.55 (Merged and Improved Build) + Watchdog 60s
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Installation from .deb, datadir/configdir fix, watchdog, and silent fallback.
 # Author: Josue / GPT-5 / Gemini — “No bullshit” build.
@@ -444,6 +444,137 @@ clients_menu(){
 }
 
 # ────────────────────────────────────────────────────────────────────────────
+# 🧠 WATCHDOG INTEGRATION — helpers (installed once)
+# ────────────────────────────────────────────────────────────────────────────
+ensure_watchdog_framework(){
+  # Lightweight checker: restarts the ffmpeg unit if it is not running or if last 200 log lines show fatal patterns
+  local WD_SCRIPT="/usr/local/bin/ffmpeg-watchdog.sh"
+  if [ ! -f "$WD_SCRIPT" ]; then
+    cat > "$WD_SCRIPT" <<'EOSH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+INSTANCE="${1:-}"
+if [ -z "$INSTANCE" ]; then
+  echo "usage: ffmpeg-watchdog.sh <instance-name>"; exit 2
+fi
+
+UNIT="ffmpeg-${INSTANCE}.service"
+LOG="/var/log/ffmpeg-${INSTANCE}.log"
+FIFO="/var/lib/snapserver/fifo/snapfifo_${INSTANCE}"
+
+restart_clean(){
+  # Attempt a soft restart; if it fails, rebuild FIFO and restart
+  systemctl restart "${UNIT}" || true
+  sleep 1
+  if ! systemctl is-active --quiet "${UNIT}"; then
+    # Recreate FIFO safely
+    if [ -p "${FIFO}" ]; then rm -f "${FIFO}"; fi
+    mkfifo "${FIFO}" || true
+    chown snapserver:snapserver "${FIFO}" || true
+    chmod 666 "${FIFO}" || true
+    systemctl restart "${UNIT}" || true
+  fi
+}
+
+# 1) If unit is not active, restart
+if ! systemctl is-active --quiet "${UNIT}"; then
+  echo "$(date -Is) watchdog: ${UNIT} was not active; restarting" >> "${LOG}"
+  restart_clean
+  exit 0
+fi
+
+# 2) If FIFO missing, recreate and restart
+if [ ! -p "${FIFO}" ]; then
+  echo "$(date -Is) watchdog: FIFO ${FIFO} missing; recreating and restarting" >> "${LOG}"
+  mkfifo "${FIFO}" || true
+  chown snapserver:snapserver "${FIFO}" || true
+  chmod 666 "${FIFO}" || true
+  restart_clean
+  exit 0
+fi
+
+# 3) Check last 200 log lines for known input/network stalls and immediate EOF
+touch "${LOG}"
+tail -n 200 "${LOG}" | grep -E -q '(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)' && {
+  echo "$(date -Is) watchdog: detected input error pattern; restarting ${UNIT}" >> "${LOG}"
+  restart_clean
+  exit 0
+}
+
+# 4) Optional: if log didn't grow in the last minute AND service is running for > 2 minutes, consider stuck and restart
+if [ -f "${LOG}" ]; then
+  LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
+  ACTIVE_SECS=$(systemctl show "${UNIT}" -p ActiveEnterTimestampMonotonic --value | awk '{print int($1/1000000)}')
+  NOW_MONO=$(cat /proc/uptime | awk '{print int($1)}')
+  RUNNING_FOR=$(( NOW_MONO - ACTIVE_SECS ))
+  if [ "${RUNNING_FOR}" -gt 120 ] && [ "${LAST_UPDATE}" -gt 90 ]; then
+    echo "$(date -Is) watchdog: log idle ${LAST_UPDATE}s; restarting ${UNIT}" >> "${LOG}"
+    restart_clean
+    exit 0
+  fi
+fi
+
+exit 0
+EOSH
+    chmod +x "$WD_SCRIPT"
+  fi
+
+  # Template service and timer
+  local WD_SVC="$SYSTEMD_DIR/ffmpeg-watchdog@.service"
+  local WD_TIM="$SYSTEMD_DIR/ffmpeg-watchdog@.timer"
+  if [ ! -f "$WD_SVC" ]; then
+cat > "$WD_SVC" <<'EOSVC'
+[Unit]
+Description=FFmpeg Watchdog for %i (checks health and restarts if needed)
+After=ffmpeg-%i.service
+Wants=ffmpeg-%i.service
+
+[Service]
+Type=oneshot
+User=root
+ExecStart=/usr/local/bin/ffmpeg-watchdog.sh %i
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+EOSVC
+  fi
+
+  if [ ! -f "$WD_TIM" ]; then
+cat > "$WD_TIM" <<'EOTIM'
+[Unit]
+Description=Run FFmpeg Watchdog for %i every 60 seconds
+
+[Timer]
+OnUnitActiveSec=60s
+OnBootSec=60s
+AccuracySec=10s
+Unit=ffmpeg-watchdog@%i.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOTIM
+  fi
+
+  systemctl daemon-reload
+}
+
+enable_watchdog_for(){
+  # $1 = instance name (stream id)
+  local inst="$1"
+  [ -z "$inst" ] && return 0
+  ensure_watchdog_framework
+  systemctl enable --now "ffmpeg-watchdog@${inst}.timer" >/dev/null 2>&1 || true
+}
+
+disable_watchdog_for(){
+  # $1 = instance name (stream id)
+  local inst="$1"
+  [ -z "$inst" ] && return 0
+  systemctl disable --now "ffmpeg-watchdog@${inst}.timer" >/dev/null 2>&1 || true
+}
+
+# ────────────────────────────────────────────────────────────────────────────
 # Stream Management with FFmpeg
 # ────────────────────────────────────────────────────────────────────────────
 get_stream_lines(){
@@ -482,18 +613,38 @@ ensure_fifo(){
 }
 
 write_unit(){
-  local service_name="$1" ffmpeg_line="$2"
+  local service_name="$1" ffmpeg_line="$2" instance_name
+  instance_name="$(sed -E 's/^ffmpeg-(.+)\.service/\1/' <<<"$service_name")"
+
+  # 🧠 WATCHDOG INTEGRATION: ensure log dir/file exists and add ExecStopPost cleanup
+  local log_file="/var/log/ffmpeg-${instance_name}.log"
+  mkdir -p /var/log
+  touch "$log_file"
+  chown "$SNAP_USER:$SNAP_GROUP" "$log_file" || true
+
   cat > "${SYSTEMD_DIR}/${service_name}" <<EOF
 [Unit]
 Description=FFmpeg Stream (${service_name})
 After=network-online.target snapserver.service
+Requires=snapserver.service
+PartOf=snapserver.service
 
 [Service]
-ExecStart=${ffmpeg_line}
+# Ensure FIFO exists before starting
+ExecStartPre=/bin/bash -c 'test -p ${SNAP_FIFO_DIR}/snapfifo_${instance_name} || mkfifo ${SNAP_FIFO_DIR}/snapfifo_${instance_name}; chown ${SNAP_USER}:${SNAP_GROUP} ${SNAP_FIFO_DIR}/snapfifo_${instance_name}; chmod 666 ${SNAP_FIFO_DIR}/snapfifo_${instance_name}'
+
+# Actual FFmpeg command (stderr to log)
+ExecStart=${ffmpeg_line} >> ${log_file} 2>&1
+
+# 🧠 WATCHDOG INTEGRATION: on stop, rebuild FIFO to avoid stale writers
+ExecStopPost=/bin/bash -c '[ -p ${SNAP_FIFO_DIR}/snapfifo_${instance_name} ] && rm -f ${SNAP_FIFO_DIR}/snapfifo_${instance_name}; mkfifo ${SNAP_FIFO_DIR}/snapfifo_${instance_name}; chown ${SNAP_USER}:${SNAP_GROUP} ${SNAP_FIFO_DIR}/snapfifo_${instance_name}; chmod 666 ${SNAP_FIFO_DIR}/snapfifo_${instance_name}'
+
 User=${SNAP_USER}
 Restart=always
 RestartSec=5
 LimitNOFILE=65536
+StandardOutput=append:${log_file}
+StandardError=inherit
 
 [Install]
 WantedBy=multi-user.target
@@ -569,6 +720,10 @@ create_stream(){
   add_or_replace_stream_line "$FIFO_PATH" "$STREAM_NAME"
   systemctl restart snapserver
   echo "✅ Stream '$STREAM_NAME' created and service '$SERVICE_NAME' started."
+
+  # 🧠 WATCHDOG INTEGRATION: turn on the timer for this stream (every 60s)
+  enable_watchdog_for "$STREAM_ID"
+
   pause
 }
 
@@ -602,10 +757,13 @@ delete_streams(){
     STREAM_ID="${fifo#snapfifo_}"
     SVC="$(service_name_for "$STREAM_ID")"
     echo "🗑️  Deleting stream $n and its associated service..."
+    # 🧠 WATCHDOG INTEGRATION: disable watchdog for this instance first
+    disable_watchdog_for "$STREAM_ID"
     systemctl stop "$SVC" 2>/dev/null || true
     systemctl disable "$SVC" 2>/dev/null || true
     rm -f "$SYSTEMD_DIR/$SVC" "$SNAP_FIFO_DIR/$fifo"
     sed -i "/${fifo}/d" "$CONF_FILE"
+    rm -f "/var/log/ffmpeg-${STREAM_ID}.log" 2>/dev/null || true
   done
   systemctl daemon-reload
   systemctl restart snapserver
@@ -708,6 +866,7 @@ main_menu(){
   [[ "$LXC_MODE" -eq 1 ]] && lxc_instructions
   ensure_silence_fallback
   monitor_snapserver
+  ensure_watchdog_framework   # 🧠 WATCHDOG INTEGRATION: ensure templates/scripts exist
 
   local opt
   while true; do
