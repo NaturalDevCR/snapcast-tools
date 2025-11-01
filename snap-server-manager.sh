@@ -1,8 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.59 (Resilient Release)
+# SNAPSTREAM MANAGER v2025.10.60 (Hotfix Release)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
-# Added validation and recovery functions to prevent script crashes.
+# Fixed critical parsing bug in watchdog activation and improved resiliency.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
 # Status: STABLE - Production ready.
 # ==============================================================================
@@ -589,7 +589,6 @@ add_or_replace_stream_line(){
 
   local new_line="source = pipe:///${fifo}?name=${name}&codec=pcm&sampleformat=${sample}"
 
-  # Atomically find [stream], remove old line matching fifo, and insert the new one.
   awk -v fifo_path="${fifo}" \
       -v new_line="${new_line}" '
       BEGIN {
@@ -687,8 +686,8 @@ edit_stream(){
   read -rp "Number of the stream to edit: " num
   mapfile -t sources < <(get_stream_lines)
   entry="${sources[$((num-1))]#*:}"
-  fifo="$(sed -E 's|.*fifo/([^?]+)\?.*|\1|' <<<"$entry")"
-  STREAM_ID="${fifo#snapfifo_}"
+  fifo="$(sed -E 's|.*snapfifo_([^?]+)\?.*|\1|' <<<"$entry")"
+  STREAM_ID="${fifo}"
   SERVICE_NAME="$(service_name_for "$STREAM_ID")"
   echo "✍️  Editing service: $SYSTEMD_DIR/$SERVICE_NAME"
   pause
@@ -707,19 +706,20 @@ delete_streams(){
   for n in "${CHOSEN[@]}"; do
     mapfile -t sources < <(get_stream_lines)
     entry="${sources[$((n-1))]#*:}"
-    fifo="$(sed -E 's|.*fifo/([^?]+)\?.*|\1|' <<<"$entry")"
-    STREAM_ID="${fifo#snapfifo_}"
+    # Use the more robust regex to extract the ID
+    fifo="$(sed -E 's|.*snapfifo_([^?]+)\?.*|\1|' <<<"$entry")"
+    STREAM_ID="${fifo}"
     SVC="$(service_name_for "$STREAM_ID")"
     LOG_FILE="$(log_file_for "$STREAM_ID")"
 
-    echo "🗑️  Deleting stream $n and its associated service..."
+    echo "🗑️  Deleting stream $n ('${STREAM_ID}') and its associated service..."
     systemctl stop "$SVC" 2>/dev/null || true
     systemctl disable "$SVC" 2>/dev/null || true
     systemctl stop "ffmpeg-watchdog@${STREAM_ID}.timer" 2>/dev/null || true
     systemctl disable "ffmpeg-watchdog@${STREAM_ID}.timer" 2>/dev/null || true
 
-    rm -f "$SYSTEMD_DIR/$SVC" "$SNAP_FIFO_DIR/$fifo" "$LOG_FILE"
-    sed -i "/${fifo}/d" "$CONF_FILE"
+    rm -f "$SYSTEMD_DIR/$SVC" "${SNAP_FIFO_DIR}/snapfifo_${STREAM_ID}" "$LOG_FILE"
+    sed -i "/snapfifo_${STREAM_ID}/d" "$CONF_FILE"
   done
   systemctl daemon-reload
   systemctl restart snapserver
@@ -736,8 +736,7 @@ check_activity(){
   for line in "${sources[@]}"; do
     entry="${line#*:}"
     name="$(sed -E 's/.*[?&]name=([^&]+).*/\1/' <<<"$entry")"
-    fifo="$(sed -E 's|.*fifo/([^?]+)\?.*|\1|' <<<"$entry")"
-    id="${fifo#snapfifo_}"
+    id="$(sed -E 's|.*snapfifo_([^?]+)\?.*|\1|' <<<"$entry")"
     svc="$(service_name_for "$id")"
     st="$(systemctl is-active "$svc" 2>/dev/null || echo unknown)"
     printf "  • %-22s : %-10s (%s)\n" "'$name'" "$st" "$svc"
@@ -752,7 +751,7 @@ check_activity(){
 enable_watchdog_for_existing(){
   echo ""
   echo "🛡️  Scanning for existing streams to enable watchdog..."
-  local sources line entry fifo STREAM_ID count=0
+  local sources line entry STREAM_ID count=0
   mapfile -t sources < <(get_stream_lines)
   if [ "${#sources[@]}" -eq 0 ]; then
     echo "ℹ️ No streams found to activate."
@@ -764,17 +763,17 @@ enable_watchdog_for_existing(){
 
   for line in "${sources[@]}"; do
     entry="${line#*:}"
-    fifo="$(sed -E 's|.*pipe:///var/lib/snapserver/fifo/([^?]+)\?.*|\1|' <<<"$entry")"
-    STREAM_ID="${fifo#snapfifo_}"
+    # Use a robust regex that finds 'snapfifo_' and captures until '?'
+    STREAM_ID=$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
 
     if [ -z "$STREAM_ID" ]; then
-        echo "⚠️  Could not parse a valid Stream ID from line: ${entry}. Skipping."
-        continue
+      echo "  -> ⚠️  Could not parse a valid Stream ID from line: ${entry}. Skipping."
+      continue
     fi
 
     echo "  -> Activating watchdog for stream ID: ${STREAM_ID}"
     if ! systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" >/dev/null 2>&1; then
-        echo "  -> ⚠️  Failed to activate watchdog for ${STREAM_ID}. Check for typos in your config."
+      echo "  -> ⚠️  Failed to activate watchdog for ${STREAM_ID}. The service template might be missing or invalid."
     fi
     ((count++))
   done
@@ -784,16 +783,17 @@ enable_watchdog_for_existing(){
 }
 
 restart_all_ffmpeg_services(){
-    echo ""
-    echo "🔁 Restarting all FFmpeg services..."
-    # Using a glob to find all services and restart them.
-    # The || true prevents the script from exiting if one of them fails.
-    systemctl restart ffmpeg-*.service || true
-    echo ""
-    echo "✅ Restart command sent to all services. Use option 5 to check their status."
-    pause
+  echo ""
+  echo "🔁 Restarting all FFmpeg services..."
+  # Use a glob to find all services. || true prevents script exit on failure of one.
+  if ! systemctl restart ffmpeg-*.service; then
+      echo "⚠️  Some services failed to restart. Use option 2 to check status."
+  else
+      echo "✅ Restart command sent successfully."
+  fi
+  echo ""
+  pause
 }
-
 
 # ────────────────────────────────────────────────────────────────────────────
 # Backups (now includes watchdog and logrotate config)
@@ -873,17 +873,15 @@ main_menu(){
   ensure_silence_fallback
   ensure_watchdog_templates
   ensure_logrotate
-  # 'monitor_snapserver' is too intrusive for the main loop, better to call when needed.
 
   local opt
   while true; do
-    # Get active stream count for the menu display
     local active_count
     active_count=$(systemctl list-units --type=service --state=running "ffmpeg-*.service" | grep -c . || echo "0")
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v2025.10.59 (Resilient Release)"
+    echo "  🧩 SNAPSTREAM MANAGER v2025.10.60 (Hotfix Release)"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
