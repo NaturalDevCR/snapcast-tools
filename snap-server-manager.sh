@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.53 (Merged and Improved Build)
+# SNAPSTREAM MANAGER v2025.10.54 (Merged and Improved Build)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Installation from .deb, datadir/configdir fix, watchdog, and silent fallback.
 # Author: Josue / GPT-5 / Gemini — “No bullshit” build.
@@ -291,7 +291,7 @@ ensure_silence_fallback(){
   echo "🔈 Verifying silent fallback (snap-silence.service)..."
 
   # ────────────────────────────────────────────────
-  # 🩹 Fix user home if misconfigured (common LXC bug)
+  # 🧱 Ensure snapserver home directory is correct
   # ────────────────────────────────────────────────
   local snap_home
   snap_home="$(getent passwd "$SNAP_USER" | cut -d: -f6)"
@@ -303,25 +303,22 @@ ensure_silence_fallback(){
   fi
 
   # ────────────────────────────────────────────────
-  # 🧱 Ensure FIFO exists and permissions are correct
+  # 🪄 Recreate FIFO with proper permissions
   # ────────────────────────────────────────────────
   mkdir -p "$SNAP_FIFO_DIR"
-  if [ ! -p "$SILENCE_FIFO" ]; then
-    echo "🪄 Creating FIFO at $SILENCE_FIFO..."
-    mkfifo "$SILENCE_FIFO"
+  if [ -p "$SILENCE_FIFO" ]; then
+    echo "🧹 Removing existing FIFO (possible bad ownership)..."
+    rm -f "$SILENCE_FIFO"
   fi
+  echo "🪄 Creating new FIFO at $SILENCE_FIFO..."
+  mkfifo "$SILENCE_FIFO"
   chown "$SNAP_USER:$SNAP_GROUP" "$SILENCE_FIFO"
   chmod 666 "$SILENCE_FIFO"
 
   # ────────────────────────────────────────────────
-  # 🪄 Create or repair service
+  # ⚙️ Create or repair the snap-silence.service
   # ────────────────────────────────────────────────
-  if [ ! -f "$SILENCE_SERVICE" ]; then
-    echo "🪄 Creating snap-silence.service..."
-  else
-    echo "🩹 Rewriting snap-silence.service (ensuring compatibility)..."
-  fi
-
+  echo "🩹 Creating or updating snap-silence.service..."
   cat > "$SILENCE_SERVICE" <<EOF
 [Unit]
 Description=Snapcast Persistent Silence (anullsrc)
@@ -343,11 +340,11 @@ EOF
   systemctl enable --now snap-silence.service
 
   # ────────────────────────────────────────────────
-  # 🔍 Autotest: verify if it started correctly
+  # 🔍 Validate the service started correctly
   # ────────────────────────────────────────────────
   sleep 1
   if ! systemctl is-active --quiet snap-silence.service; then
-    echo "⚠️ snap-silence.service failed to start, retrying permissions..."
+    echo "⚠️ snap-silence.service failed to start. Retrying..."
     chown "$SNAP_USER:$SNAP_GROUP" "$SILENCE_FIFO"
     chmod 666 "$SILENCE_FIFO"
     systemctl restart snap-silence.service
@@ -359,6 +356,21 @@ EOF
   else
     echo "❌ snap-silence.service is still failing. Check logs with:"
     echo "   journalctl -u snap-silence -n 50 --no-pager"
+  fi
+
+  # ────────────────────────────────────────────────
+  # 📄 Ensure fallback is declared in snapserver.conf
+  # ────────────────────────────────────────────────
+  echo ""
+  echo "🧩 Checking fallback entry in $CONF_FILE ..."
+  if ! grep -q "silence.fifo" "$CONF_FILE"; then
+    echo "🪄 Adding fallback pipe to configuration..."
+    grep -q "^\[stream\]" "$CONF_FILE" || echo "[stream]" >> "$CONF_FILE"
+    echo "fallback = pipe:////var/lib/snapserver/fifo/silence.fifo?name=Silence" >> "$CONF_FILE"
+    chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
+    echo "✅ Fallback added to config file."
+  else
+    echo "✅ Fallback already present in configuration."
   fi
   echo ""
 }
