@@ -4,7 +4,7 @@
 # Configures Snapclient on Proxmox/LXC/Debian with fixed ALSA, passthrough,
 # asound.conf, configurable volume control, and automatic verification.
 #
-# Author: Josue / GPT-5 — v3 (Enhanced by Gemini)
+# Author: Josue / GPT-5 — v3.1 (Enhanced by Gemini)
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -13,7 +13,31 @@ set -Eeuo pipefail
 
 detect_environment() {
   if command -v pct >/dev/null 2>&1; then
-@@ -40,154 +41,150 @@ get_suggested_snap_ver() {
+    echo "proxmox"
+  elif grep -qa container=lxc /proc/1/environ 2>/dev/null; then
+    echo "lxc"
+  elif [[ -f /etc/debian_version ]]; then
+    echo "debian"
+  else
+    echo "unknown"
+  fi
+}
+
+detect_debian_codename() {
+  grep VERSION_CODENAME= /etc/os-release | cut -d= -f2 2>/dev/null || echo "unknown"
+}
+
+detect_snap_version() {
+  snapclient --version 2>/dev/null | head -n1 | awk '{print $3}' || echo "none"
+}
+
+get_suggested_snap_ver() {
+  local codename="$1"
+  case "$codename" in
+    bullseye) echo "v0.29.0" ;;
+    bookworm) echo "v0.33.0" ;;
+    trixie) echo "v0.34.0" ;;
+    *) echo "v0.33.0" ;;
   esac
 }
 
@@ -81,8 +105,6 @@ check_prerequisites() {
   pause
 }
 
-
-
 check_alsa_modules() {
   echo ""
   echo "🎧 Checking ALSA modules on the host…"
@@ -117,8 +139,6 @@ check_alsa_modules() {
   fi
   echo ""
 }
-
-
 
 generate_diagnostics() {
   local OUT="/root/snap-audio-check.log"
@@ -168,7 +188,13 @@ fix_alsa_order() {
   echo
 
   CARDS=()
-@@ -201,45 +198,35 @@ fix_alsa_order() {
+  IDS=()
+
+  for card in /proc/asound/card*/id; do
+    cid=$(basename "$(dirname "$card")")
+    name=$(cat "$card")
+    CARDS+=("$cid")
+    IDS+=("$name")
   done
 
   if [ ${#CARDS[@]} -eq 0 ]; then
@@ -202,19 +228,12 @@ fix_alsa_order() {
   local MOD_USB="snd-usb-audio"
   local MOD_HDA="snd-hda-intel"
 
-
-
-
-
-
-
-
-
-
-
   if [[ "$MAIN" =~ [Uu][Ss][Bb] || "$MAIN" =~ [Dd]evice ]]; then
     echo "options $MOD_USB index=0" >> "$CONF_FILE"
-@@ -250,15 +237,81 @@ fix_alsa_order() {
+    echo "options $MOD_HDA index=1" >> "$CONF_FILE"
+  else
+    echo "options $MOD_HDA index=0" >> "$CONF_FILE"
+    echo "options $MOD_USB index=1" >> "$CONF_FILE"
   fi
 
   echo
@@ -296,7 +315,12 @@ CONF
 
 setup_snapclient() {
   local ENVIRONMENT
-@@ -271,12 +324,12 @@ setup_snapclient() {
+  ENVIRONMENT=$(detect_environment)
+
+  local CTID=""
+  local DEBIAN_VERSION=""
+  local INSTALLED_VER=""
+  local SUGGESTED_VER=""
 
   if [ "$ENVIRONMENT" = "proxmox" ]; then
     echo ""
@@ -309,7 +333,12 @@ setup_snapclient() {
       exit 1
     fi
     DEBIAN_VERSION=$(pct exec "$CTID" -- bash -c 'grep VERSION_CODENAME= /etc/os-release | cut -d= -f2' 2>/dev/null || echo "bookworm")
-@@ -289,212 +342,172 @@ setup_snapclient() {
+    INSTALLED_VER=$(pct exec "$CTID" -- bash -c 'snapclient --version 2>/dev/null | head -n1 | awk "{print \$3}"' || echo "none")
+  else
+    DEBIAN_VERSION=$(detect_debian_codename)
+    INSTALLED_VER=$(detect_snap_version)
+  fi
+
   SUGGESTED_VER=$(get_suggested_snap_ver "$DEBIAN_VERSION")
 
   echo ""
@@ -319,28 +348,8 @@ setup_snapclient() {
   echo ""
 
   aplay -l | grep '^card' || { echo "❌ No ALSA cards detected on this system."; exit 1; }
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   echo ""
   read -rp "Enter the card number to use (e.g., 0=Internal, 1=DAC): " CARD_ID
-
-
-
-
-
 
   mapfile -t DEVICE_NUMS < <(aplay -l 2>/dev/null | awk -v id=$CARD_ID '/^card/ && $2==id":" {print $6}' | sed 's/,//')
   if [ ${#DEVICE_NUMS[@]} -eq 0 ]; then
@@ -393,7 +402,6 @@ setup_snapclient() {
   echo " Snapclient Version: $SUGGESTED_VER"
   echo " Card:              card $CARD_ID (${CARD_DESC:-Unknown})"
   echo " ALSA Device:       $ALSA_DEVICE"
-
   echo " Snapserver IP:     $SNAPSERVER_IP"
   echo " Client Name:       $CLIENT_NAME"
   echo " Initial Volume:    ${VOLUME}%"
@@ -423,42 +431,6 @@ EOF
   else # Standalone Debian/LXC
     echo "📦 Installing and configuring Snapclient locally…"
     _install_and_configure_snapclient "$SUGGESTED_VER" "$DEBIAN_VERSION" "$CARD_ID" "$ALSA_DEVICE" "$CLIENT_NAME" "$SNAPSERVER_IP" "$VOLUME"
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
   fi
 
   verify_snapclient "$ENVIRONMENT" "${CTID:-}"
@@ -490,8 +462,6 @@ verify_snapclient() {
   echo ""
   pause
 }
-
-
 
 verify_existing_snapclient() {
   local ENVIRONMENT
