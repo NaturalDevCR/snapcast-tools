@@ -1,8 +1,8 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.64 (Critical Fix Release)
+# SNAPSTREAM MANAGER v2025.10.65 (Accuracy Release)
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
-# Fixed critical config parsing and silent RPC failures.
+# Improved status detection to accurately show FALLBACK/OFFLINE states.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
 # Status: STABLE - Production ready.
 # ==============================================================================
@@ -363,11 +363,8 @@ EOF
 # ────────────────────────────────────────────────────────────────────────────
 rpc(){
     local response error_message
-    # Use --fail to make curl return an error code on HTTP errors (like 404)
-    # Capture stderr to a variable to show it if needed
     response=$(curl --fail -s --connect-timeout 5 -H 'Content-Type: application/json' -X POST "$SNAP_RPC" -d "$1" 2> >(error_message=$(cat); echo "$error_message" >&2))
     if [ $? -ne 0 ]; then
-        # On error, print a helpful message and return an error code
         echo "RPC_ERROR: Failed to communicate with Snapserver on ${SNAP_RPC}." >&2
         if [ -n "$error_message" ]; then
             echo "curl error: ${error_message}" >&2
@@ -468,7 +465,6 @@ clients_menu(){
 # Stream Management with FFmpeg & Advanced Watchdog
 # ────────────────────────────────────────────────────────────────────────────
 get_stream_lines(){
-  # Robust way to get 'source' lines only from within the [stream] section
   sed -n '/^\[stream\]/,/^\[/p' "$CONF_FILE" | grep '^\s*source\s*='
 }
 
@@ -787,13 +783,16 @@ check_activity(){
     
     source_status="-"
     if [ -n "$server_status" ]; then
-        local current_uri
-        current_uri=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .uri.path')
-        if [[ "$current_uri" == *"/silence.fifo" ]]; then
-            source_status="FALLBACK"
-        elif [ -n "$current_uri" ]; then
-            source_status="MAIN"
-        fi
+      local current_uri
+      current_uri=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .uri.path')
+      
+      if [[ "$current_uri" == *"/silence.fifo" ]]; then
+          source_status="FALLBACK"
+      elif [[ "$st" != "active" ]]; then
+          source_status="OFFLINE"
+      elif [ -n "$current_uri" ]; then
+          source_status="MAIN"
+      fi
     fi
 
     printf "  • %-22s | Service: %-10s | Source: %-8s\n" "'$name'" "$st" "$source_status"
