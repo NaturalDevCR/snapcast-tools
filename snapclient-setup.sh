@@ -1,9 +1,10 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.3 (Final Fix)
-# Restored original script with corrected checksum logic to handle missing files.
+# setup-snapclient.sh - v3.4 (Final Volume Persistence)
+# Restored original script with corrected checksum logic, privileged container
+# checks, and robust volume persistence via alsa-restore.service.
 #
-# Author: Josue / GPT-5 — v3.3
+# Author: Josue / GPT-5 — v3.4
 # ==============================================================================
 
 set -Eeuo pipefail
@@ -126,7 +127,7 @@ check_alsa_modules() {
   echo ""
 }
 
-# === INSTALLATION LOGIC (WITH CORRECT CHECKSUM HANDLING) ====================
+# === INSTALLATION LOGIC (WITH FINAL VOLUME HANDLING) ========================
 
 _install_and_configure_snapclient() {
   set -Eeuo pipefail
@@ -156,10 +157,7 @@ _install_and_configure_snapclient() {
   
   local CHECKSUM_FILE="${DEB_FILE}.sha256"
   
-  # --- FINAL FIX LOGIC ---
-  # Attempt to download the checksum file.
   if wget --show-progress -O "$CHECKSUM_FILE" "${BASE_URL}/${CHECKSUM_FILE}"; then
-      # If download SUCCEEDS, then verify.
       echo "🛡️  Verifying package integrity..."
       if sha256sum -c --strict --status "$CHECKSUM_FILE"; then
           echo "✅ Checksum verified."
@@ -168,7 +166,6 @@ _install_and_configure_snapclient() {
           return 1
       fi
   else
-      # If download FAILS, warn the user and skip verification.
       echo "⚠️  Could not download the checksum file (it may not exist for this version). Skipping verification."
   fi
   
@@ -189,13 +186,33 @@ START_SNAPCLIENT=true
 SNAPCLIENT_OPTS="--soundcard ${ALSA_DEVICE} --hostID ${CLIENT_NAME} --host ${SNAPSERVER_IP}"
 CONF
 
-  echo "Setting initial volume to ${VOLUME}%..."
-  amixer -c "$CARD_ID" sset Master "${VOLUME}%" || \
-  amixer -c "$CARD_ID" sset Speaker "${VOLUME}%" || \
-  amixer -c "$CARD_ID" sset PCM "${VOLUME}%" || \
-  echo "⚠️ Could not set volume. You may need to set it manually."
+  # --- ROBUST VOLUME SETTING AND PERSISTENCE ---
+  echo "Setting initial volume to ${VOLUME}% and ensuring it persists..."
+  
+  # Try to set volume on common controls, in order of preference.
+  if amixer -c "$CARD_ID" sset Master "${VOLUME}%" >/dev/null 2>&1; then
+      echo "✅ Volume set on 'Master' control."
+  elif amixer -c "$CARD_ID" sset Speaker "${VOLUME}%" >/dev/null 2>&1; then
+      echo "✅ Volume set on 'Speaker' control."
+  elif amixer -c "$CARD_ID" sset PCM "${VOLUME}%" >/dev/null 2>&1; then
+      echo "✅ Volume set on 'PCM' control."
+  else
+      echo "⚠️ Could not find a common mixer control (Master, Speaker, PCM) to set the volume."
+  fi
 
-  alsactl store || true
+  # Save the current ALSA settings to the state file.
+  if alsactl store; then
+      echo "✅ ALSA settings saved to /var/lib/alsa/asound.state."
+  else
+      echo "⚠️ Could not save ALSA settings."
+  fi
+
+  # Ensure the alsa-restore service is enabled to load settings on boot.
+  if systemctl enable alsa-restore.service >/dev/null 2>&1; then
+      echo "✅ ALSA restore service enabled to persist volume across reboots."
+  else
+      echo "⚠️ Could not enable alsa-restore service."
+  fi
   
   echo "🚀 Starting Snapclient service..."
   systemctl enable --now snapclient
@@ -205,7 +222,6 @@ CONF
 # === CONFIGURE SNAPCLIENT (MAIN FUNCTION) ===================================
 
 setup_snapclient() {
-  # ... (Esta función es idéntica a tu versión original, con la única adición de la comprobación de contenedor privilegiado)
   local ENVIRONMENT
   ENVIRONMENT=$(detect_environment)
   local CTID=""
