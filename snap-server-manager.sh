@@ -459,12 +459,13 @@ clients_menu(){
 # sources, excluding MetaStreams and the Silence process.
 ##
 get_stream_lines(){
-  # Use awk to reliably return all pipe sources inside the [stream] section
+  # Use awk to reliably return all pipe sources inside the [stream] section,
+  # allowing optional leading whitespace before section headers.
   awk '
     BEGIN { in_stream = 0 }
-    /^\[stream\]/ { in_stream = 1; next }
-    /^\[/ { if (in_stream) in_stream = 0 }
-    in_stream && /^\s*source\s*=\s*pipe:/ { print }
+    /^[[:space:]]*\[stream\]/ { in_stream = 1; next }
+    /^[[:space:]]*\[/ { if (in_stream) in_stream = 0 }
+    in_stream && /^[[:space:]]*source[[:space:]]*=[[:space:]]*pipe:/ { print }
   ' "$CONF_FILE"
 }
 
