@@ -1007,17 +1007,19 @@ services_menu(){
     echo "3) Restart Snapserver (optional)"
     echo "4) Restart specific FFmpeg services (optional)"
     echo "5) Restart ALL FFmpeg services (optional)"
-    echo "6) Logs & Watchdog Settings"
-    echo "7) Back"
-    read -rp "Choose [1-7]: " opt < /dev/tty
+    echo "6) Enable Watchdog for all streams (report)"
+    echo "7) Logs & Watchdog Settings"
+    echo "8) Back"
+    read -rp "Choose [1-8]: " opt < /dev/tty
     case "$opt" in
       1) monitor_snapserver ;;
       2) check_activity ;;
       3) restart_snapserver_with_confirm ;;
       4) restart_selected_ffmpeg_services ;;
       5) restart_all_ffmpeg_services ;;
-      6) logs_and_watchdog_menu ;;
-      7) return ;;
+      6) enable_watchdog_for_all_with_report ;;
+      7) logs_and_watchdog_menu ;;
+      8) return ;;
       *) ;;
     esac
   done
@@ -1072,6 +1074,68 @@ enable_watchdog_for_existing(){
 
   echo ""
   echo "✅ Finished processing ${count} stream(s)."
+  pause
+}
+
+##
+# enable_watchdog_for_all_with_report
+# Enables the watchdog timer for all FFmpeg stream services and prints
+# a compact per-stream report showing enable result and current active state.
+#
+# Why: Quickly verify coverage across all streams without checking each unit.
+##
+enable_watchdog_for_all_with_report(){
+  echo ""
+  echo "🛡️  Enabling Watchdog timers for all streams (with report)..."
+  systemctl daemon-reload
+
+  local -a ids; ids=()
+  # Prefer enumerating installed FFmpeg services
+  if compgen -G "${SYSTEMD_DIR}/ffmpeg-*.service" > /dev/null; then
+    for svc in "${SYSTEMD_DIR}"/ffmpeg-*.service; do
+      [ -e "$svc" ] || continue
+      local base id
+      base=$(basename "$svc")
+      # Skip watchdog template/service files themselves
+      if [[ "$base" == ffmpeg-watchdog@.service ]]; then
+        continue
+      fi
+      id=${base#ffmpeg-}
+      id=${id%.service}
+      ids+=("$id")
+    done
+  else
+    # Fallback to parsing pipe sources from configuration
+    local seen
+    seen=""
+    while IFS= read -r line; do
+      local STREAM_ID
+      STREAM_ID=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+      [ -z "$STREAM_ID" ] && continue
+      if [[ " $seen " != *" $STREAM_ID "* ]]; then
+        ids+=("$STREAM_ID")
+        seen+=" $STREAM_ID"
+      fi
+    done < <(get_stream_lines)
+  fi
+
+  if [ ${#ids[@]} -eq 0 ]; then
+    echo "❌ No FFmpeg streams found to enable watchdog."; pause; return
+  fi
+
+  printf "\n%-24s | %-10s | %-10s\n" "Stream ID" "Enable" "Active"
+  printf -- "-------------------------+------------+------------\n"
+  local id result st
+  for id in "${ids[@]}"; do
+    if systemctl enable --now "ffmpeg-watchdog@${id}.timer" >/dev/null 2>&1; then
+      result="enabled"
+    else
+      result="error"
+    fi
+    st=$(systemctl is-active "ffmpeg-watchdog@${id}.timer" 2>/dev/null || echo "inactive")
+    printf "%-24s | %-10s | %-10s\n" "$id" "$result" "$st"
+  done
+  echo ""
   pause
 }
 
