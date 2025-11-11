@@ -324,12 +324,13 @@ ensure_silence_fallback(){
   awk -v new_line="$silence_line" '
     BEGIN { in_stream=0; replaced=0; inserted=0; }
     /^\[stream\]/ { print; in_stream=1; next }
-    /^\[/ { 
+    /^\[/ {
       if (in_stream && !inserted && !replaced) { print new_line; inserted=1 }
       in_stream=0
     }
     {
-      if (in_stream && $0 ~ /^\s*source\s*=\s*process:\/\/\/\/usr\/bin\/ffmpeg/ && $0 ~ /name=Silence/) {
+      # Match any existing Silence process line regardless of slash count or param order
+      if (in_stream && $0 ~ /^\s*source\s*=\s*process:\/\/+usr\/bin\/ffmpeg/ && $0 ~ /([?&])name=Silence/) {
         if (!replaced) { print new_line; replaced=1 }
         next
       }
