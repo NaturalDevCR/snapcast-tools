@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.0
+# SNAPSTREAM MANAGER v1.0.1
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -738,13 +738,13 @@ ensure_default_pipe_sources(){
 
 # Ensure default metastreams referencing Silence fallback
 ##
-/**
- * ensure_default_metastreams
- * Creates/updates the user-facing MetaStreams for each raw pipe source, pointing to
- * `meta:///<SourceName>/Silence` with `codec=pcm` and `sampleformat=48000:16:2`.
- *
- * Why: Presents meaningful names to users and guarantees Silence fallback.
- */
+#
+# ensure_default_metastreams
+# Creates/updates the user-facing MetaStreams for each raw pipe source, pointing to
+# `meta:///<SourceName>/Silence` with `codec=pcm` and `sampleformat=48000:16:2`.
+#
+# Why: Presents meaningful names to users and guarantees Silence fallback.
+#
 ensure_default_metastreams(){
   # Guard: require global Silence to exist in [stream] before creating MetaStreams
   if ! grep -qE '^\s*source\s*=\s*process:///usr/bin/ffmpeg.*name=Silence' "$CONF_FILE"; then
@@ -1190,7 +1190,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.0 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.1 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -1353,11 +1353,11 @@ logs_and_watchdog_menu(){
 # ────────────────────────────────────────────────────────────────────────────
 # Configuration Menu (manual actions)
 # ────────────────────────────────────────────────────────────────────────────
-/**
- * configuration_menu
- * Provides manual configuration actions: LXC/local capture help, ensuring global Silence,
- * declaring default pipe sources, and creating default MetaStreams.
- */
+#
+# configuration_menu
+# Provides manual configuration actions: LXC/local capture help, ensuring global Silence,
+# declaring default pipe sources, and creating default MetaStreams.
+#
 configuration_menu(){
   local opt
   while true; do
