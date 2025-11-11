@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v2025.10.65 (Final Stable Release)
+# SNAPSTREAM MANAGER v2025.10.66
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -26,6 +26,7 @@ SNAP_USER="snapserver"
 SNAP_GROUP="snapserver"
 DEFAULT_GROUP="Default"
 SNAP_RPC="http://127.0.0.1:1780/jsonrpc"
+WATCHDOG_CONF="/etc/snapserver.d/snapstream-watchdog.conf"
 
 # --- Variables for Silent Fallback (integrated) ---
 SILENCE_FIFO="$SNAP_FIFO_DIR/silence.fifo"
@@ -276,11 +277,21 @@ ensure_prereqs(){
 }
 
 # ────────────────────────────────────────────────────────────────────────────
-# Automatic Silent Fallback
+# Automatic Silent Fallback (MetaStreams-friendly)
 # ────────────────────────────────────────────────────────────────────────────
+##
+# ensure_silence_fallback
+# Adds/updates a global Silence source using a process URI (ffmpeg) inside
+# the `[stream]` section of `/etc/snapserver.conf`. This Silence has
+# `codec=null` so it remains invisible to users, and is intended to be used
+# as the fallback target by MetaStreams.
+#
+# Why: Using a global Silence source and MetaStreams is the recommended
+# structure to ensure stable fallback behavior across all user-facing streams.
+##
 ensure_silence_fallback(){
   echo ""
-  echo "🔈 Verifying silent fallback (snap-silence.service)..."
+  echo "🔈 Verificando y generando silence global (process:///ffmpeg)…"
   local snap_home
   snap_home="$(getent passwd "$SNAP_USER" | cut -d: -f6)"
   if [ "$snap_home" != "/var/lib/snapserver" ]; then
@@ -290,71 +301,43 @@ ensure_silence_fallback(){
     chown -R "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver
   fi
 
-  mkdir -p "$SNAP_FIFO_DIR"
-  local recreate_fifo=0
-  if [ ! -p "$SILENCE_FIFO" ]; then
-      recreate_fifo=1
-      echo "🪄 FIFO not found. Creating new one..."
-  elif [ "$(stat -c %U "$SILENCE_FIFO")" != "$SNAP_USER" ] || [ "$(stat -c %G "$SILENCE_FIFO")" != "$SNAP_GROUP" ]; then
-      recreate_fifo=1
-      echo "🧹 FIFO has incorrect ownership. Recreating..."
+  # If an old FIFO-based silence service exists, disable and remove it
+  if systemctl list-unit-files | grep -q '^snap-silence\.service'; then
+    echo "🧹 Disabling legacy snap-silence.service (FIFO-based)…"
+    systemctl stop snap-silence.service 2>/dev/null || true
+    systemctl disable snap-silence.service 2>/dev/null || true
   fi
+  [ -f "$SILENCE_SERVICE" ] && rm -f "$SILENCE_SERVICE"
+  [ -p "$SILENCE_FIFO" ] && rm -f "$SILENCE_FIFO"
 
-  if [ "$recreate_fifo" -eq 1 ]; then
-      rm -f "$SILENCE_FIFO"
-      mkfifo "$SILENCE_FIFO"
-      chown "$SNAP_USER:$SNAP_GROUP" "$SILENCE_FIFO"
-      chmod 666 "$SILENCE_FIFO"
-  fi
+  # Ensure [stream] section exists
+  grep -q "^\[stream\]" "$CONF_FILE" || echo "[stream]" >> "$CONF_FILE"
 
-  echo "🩹 Creating or updating snap-silence.service..."
-  cat > "$SILENCE_SERVICE" <<EOF
-[Unit]
-Description=Snapcast Persistent Silence (anullsrc)
-After=snapserver.service
-Requires=snapserver.service
+  # Add or replace the global silence process source inside [stream]
+  local tmp_conf; tmp_conf="$(mktemp)"
+  trap 'rm -f "$tmp_conf"' RETURN
+  local silence_line="source = process:///usr/bin/ffmpeg?name=Silence&codec=null&sampleformat=48000:16:2&params=-f lavfi -i anullsrc=r=48000:cl=stereo -f s16le -ar 48000 -ac 2 -"
 
-[Service]
-ExecStart=/bin/bash -c '/usr/bin/ffmpeg -hide_banner -nostats -loglevel error -f lavfi -i anullsrc=r=48000:cl=stereo -f wav pipe:1 > $SILENCE_FIFO'
-Restart=always
-RestartSec=3
-User=$SNAP_USER
-Group=$SNAP_GROUP
+  awk -v new_line="$silence_line" '
+    BEGIN { in_stream=0; replaced=0; inserted=0; }
+    /^\[stream\]/ { print; in_stream=1; next }
+    /^\[/ { 
+      if (in_stream && !inserted && !replaced) { print new_line; inserted=1 }
+      in_stream=0
+    }
+    {
+      if (in_stream && $0 ~ /^\s*source\s*=\s*process:\/\/\/\/usr\/bin\/ffmpeg/ && $0 ~ /name=Silence/) {
+        if (!replaced) { print new_line; replaced=1 }
+        next
+      }
+      print
+    }
+    END { if (in_stream && !inserted && !replaced) print new_line }
+  ' "$CONF_FILE" > "$tmp_conf"
 
-[Install]
-WantedBy=multi-user.target
-EOF
-
-  systemctl daemon-reload
-  systemctl enable --now snap-silence.service
-
-  sleep 1
-  if ! systemctl is-active --quiet snap-silence.service; then
-    echo "⚠️ snap-silence.service failed to start. Retrying..."
-    chown "$SNAP_USER:$SNAP_GROUP" "$SILENCE_FIFO"
-    chmod 666 "$SILENCE_FIFO"
-    systemctl restart snap-silence.service
-    sleep 1
-  fi
-
-  if systemctl is-active --quiet snap-silence.service; then
-    echo "✅ snap-silence.service is active and running."
-  else
-    echo "❌ snap-silence.service is still failing. Check logs with:"
-    echo "   journalctl -u snap-silence -n 50 --no-pager"
-  fi
-
-  echo ""
-  echo "🧩 Checking fallback entry in $CONF_FILE ..."
-  if ! grep -q "silence.fifo" "$CONF_FILE"; then
-    echo "🪄 Adding fallback pipe to configuration..."
-    grep -q "^\[stream\]" "$CONF_FILE" || echo "[stream]" >> "$CONF_FILE"
-    echo "fallback = pipe:////var/lib/snapserver/fifo/silence.fifo?name=Silence" >> "$CONF_FILE"
-    chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
-    echo "✅ Fallback added to config file."
-  else
-    echo "✅ Fallback already present in configuration."
-  fi
+  mv "$tmp_conf" "$CONF_FILE"
+  chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
+  echo "✅ Silence global agregado/actualizado en la sección [stream]."
   echo ""
 }
 
@@ -464,8 +447,14 @@ clients_menu(){
 # ────────────────────────────────────────────────────────────────────────────
 # Stream Management with FFmpeg & Advanced Watchdog
 # ────────────────────────────────────────────────────────────────────────────
+##
+# get_stream_lines
+# Returns only pipe source lines from the `[stream]` section. This ensures
+# operations (edit/delete/watchdog/restart) target actual FFmpeg-backed
+# sources, excluding MetaStreams and the Silence process.
+##
 get_stream_lines(){
-  sed -n '/^\[stream\]/,/^\[/p' "$CONF_FILE" | grep '^\s*source\s*='
+  sed -n '/^\[stream\]/,/^\[/p' "$CONF_FILE" | grep -E '^\s*source\s*=\s*pipe:'
 }
 
 show_streams_numbered(){
@@ -536,6 +525,7 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+EnvironmentFile=/etc/snapserver.d/snapstream-watchdog.conf
 ExecStart=/bin/bash -c '\
   set -e; \
   INSTANCE="%i"; \
@@ -543,19 +533,22 @@ ExecStart=/bin/bash -c '\
   LOG="/var/log/ffmpeg/ffmpeg-${INSTANCE}.log"; \
   FIFO="/var/lib/snapserver/fifo/snapfifo_${INSTANCE}"; \
   REASON=""; \
+  LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-90}"; \
+  MIN_UPTIME_SECONDS="${MIN_UPTIME_SECONDS:-120}"; \
+  ERROR_PATTERN_REGEX="${ERROR_PATTERN_REGEX:-\"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)\"}"; \
   \
   if ! systemctl is-active --quiet "${UNIT}"; then \
     REASON="service was not active"; \
   elif [ ! -p "${FIFO}" ]; then \
     REASON="FIFO pipe was missing"; \
-  elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q "(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"; then \
+  elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q ${ERROR_PATTERN_REGEX}; then \
     REASON="detected critical error pattern in logs"; \
   elif [ -f "${LOG}" ]; then \
     LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) )); \
-    if [[ "${LAST_UPDATE}" -gt 90 ]]; then \
+    if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then \
        ACTIVE_SINCE_BOOT=$(systemctl show ${UNIT} -p ActiveEnterTimestampMonotonic --value); \
        UPTIME=$(awk "{print int(\$1)}" /proc/uptime); \
-       if [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt 120 ]]; then \
+       if [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then \
           REASON="process appears frozen (log not updated in ${LAST_UPDATE}s)"; \
        fi; \
     fi; \
@@ -585,6 +578,17 @@ OnUnitActiveSec=1m
 WantedBy=timers.target
 EOF
   fi
+
+  # Ensure watchdog config file exists with defaults
+  if [ ! -f "$WATCHDOG_CONF" ]; then
+    mkdir -p "$(dirname "$WATCHDOG_CONF")"
+    cat > "$WATCHDOG_CONF" <<EOF
+# Snapstream Watchdog configuration (defaults)
+LOG_STALE_SECONDS=90
+MIN_UPTIME_SECONDS=120
+ERROR_PATTERN_REGEX="(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"
+EOF
+  fi
 }
 
 ensure_logrotate(){
@@ -611,12 +615,21 @@ ffmpeg_cmd_for(){
   echo "/usr/bin/ffmpeg -hide_banner -nostats -loglevel error $INPUT_ARGS -acodec pcm_s16le -ac 2 -ar 48000 -f s16le -y \"$FIFO_PATH\""
 }
 
+##
+# add_or_replace_stream_line
+# Ensures a single pipe source line (codec=null) exists in the `[stream]`
+# section for the given FIFO path and display name. If found, it replaces it;
+# otherwise it inserts it once.
+#
+# Why: All user streams should be declared with `codec=null` so they are not
+# directly visible to users; they will be wrapped by MetaStreams instead.
+##
 add_or_replace_stream_line(){
   local fifo="$1" name="$2" sample="48000:16:2"
   local tmp_conf; tmp_conf="$(mktemp)"
   trap 'rm -f "$tmp_conf"' RETURN
 
-  local new_line="source = pipe:///${fifo}?name=${name}&codec=pcm&sampleformat=${sample}"
+  local new_line="source = pipe:///${fifo}?name=${name}&codec=null&sampleformat=${sample}"
 
   awk -v fifo_path="${fifo}" \
       -v new_line="${new_line}" '
@@ -649,6 +662,92 @@ add_or_replace_stream_line(){
 
   mv "$tmp_conf" "$CONF_FILE"
   chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
+}
+
+# Add or replace a metastream line referencing a source and the global Silence
+##
+# add_or_replace_metastream_line
+# Ensures a single MetaStream line exists that references
+# `meta:///<source_name>/Silence` with the given `meta_name` and `codec=pcm`.
+# If found, it replaces it; else it inserts it once.
+#
+# Why: MetaStreams present the user-facing stream and include the global
+# Silence as the fallback, providing correct behavior when the source is down.
+##
+add_or_replace_metastream_line(){
+  local source_name="$1" meta_name="$2" sample="48000:16:2"
+  local tmp_conf; tmp_conf="$(mktemp)"
+  trap 'rm -f "$tmp_conf"' RETURN
+
+  local new_line="source = meta:///${source_name}/Silence?name=${meta_name}&codec=pcm&sampleformat=${sample}"
+
+  awk -v src_name="${source_name}" \
+      -v new_line="${new_line}" '
+      BEGIN { in_stream_section = 0; inserted = 0; replaced = 0; }
+      /^\[stream\]/ { print; in_stream_section = 1; next; }
+      /^\[/ {
+          if (in_stream_section && !inserted && !replaced) {
+              print new_line;
+              inserted = 1;
+          }
+          in_stream_section = 0;
+      }
+      in_stream_section && $0 ~ "^\\s*source\\s*=\\s*meta:///" src_name "/Silence" {
+          if (!replaced) { print new_line; replaced = 1; }
+          next;
+      }
+      { print; }
+      END {
+          if (in_stream_section && !inserted && !replaced) {
+              print new_line;
+          }
+      }
+  ' "$CONF_FILE" > "$tmp_conf"
+
+  mv "$tmp_conf" "$CONF_FILE"
+  chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
+}
+
+# Ensure default pipe sources with codec=null for known FIFOs and names
+##
+# ensure_default_pipe_sources
+# Declares the fixed set of known FIFO-based sources with `codec=null`.
+# These are the non-visible raw sources that MetaStreams will wrap.
+#
+# Why: Keeps config consistent and eliminates duplicate/incorrect entries.
+##
+ensure_default_pipe_sources(){
+  echo "🧩 Ensuring default pipe sources (codec=null)…"
+  add_or_replace_stream_line \
+    "/var/lib/snapserver/fifo/snapfifo_frontdesk" "PC-FrontDesk"
+  add_or_replace_stream_line \
+    "/var/lib/snapserver/fifo/snapfifo_aracari" "PC-Aracari"
+  add_or_replace_stream_line \
+    "/var/lib/snapserver/fifo/snapfifo_azuracastrestaurants" "Azuracast-Restaurants"
+  add_or_replace_stream_line \
+    "/var/lib/snapserver/fifo/snapfifo_azuracastfrontdesk" "Azuracast-FrontDesk"
+  add_or_replace_stream_line \
+    "/var/lib/snapserver/fifo/snapfifo_azuracastoutdoors" "Azuracast-Outdoors"
+  add_or_replace_stream_line \
+    "/var/lib/snapserver/fifo/snapfifo_pcpool" "PC-Pool"
+}
+
+# Ensure default metastreams referencing Silence fallback
+##
+# ensure_default_metastreams
+# Creates/updates the user-facing MetaStreams for each source, pointing to
+# `<SourceName>/Silence` with `codec=pcm`.
+#
+# Why: Presents proper names to users and guarantees Silence fallback.
+##
+ensure_default_metastreams(){
+  echo "🧩 Ensuring default metastreams (codec=pcm, Silence fallback)…"
+  add_or_replace_metastream_line "PC-FrontDesk" "FrontDesk"
+  add_or_replace_metastream_line "PC-Aracari" "Aracari"
+  add_or_replace_metastream_line "Azuracast-Restaurants" "Restaurants"
+  add_or_replace_metastream_line "Azuracast-FrontDesk" "AzuraFrontDesk"
+  add_or_replace_metastream_line "Azuracast-Outdoors" "Outdoors"
+  add_or_replace_metastream_line "PC-Pool" "Pool"
 }
 
 create_stream(){
@@ -805,6 +904,104 @@ check_activity(){
   echo "🔎 To see logs, run: tail -f /var/log/ffmpeg/ffmpeg-<stream_id>.log"
   echo ""
   pause
+}
+
+##
+# restart_snapserver_with_confirm
+# Asks for confirmation and restarts the Snapserver service. Shows a short
+# status summary after the restart.
+##
+restart_snapserver_with_confirm(){
+  echo ""
+  read -rp "⚠️  Restart Snapserver now? (y/N): " ans < /dev/tty
+  if [[ "$ans" =~ ^[Yy]$ ]]; then
+    echo "🔁 Restarting Snapserver…"
+    if systemctl restart snapserver; then
+      sleep 1
+      local st
+      st=$(systemctl is-active snapserver 2>/dev/null || echo "unknown")
+      echo "✅ Snapserver status: $st"
+    else
+      echo "❌ Failed to restart Snapserver. Check: journalctl -u snapserver -n 50 --no-pager"
+    fi
+  else
+    echo "🟡 Skipped Snapserver restart."
+  fi
+  echo ""
+  pause
+}
+
+##
+# restart_selected_ffmpeg_services
+# Lets the user pick specific FFmpeg services (by stream number) to restart,
+# asks for confirmation, and restarts each selected service.
+##
+restart_selected_ffmpeg_services(){
+  show_streams_numbered || { pause; return; }
+  local sel CHOSEN entry id svc st
+  mapfile -t sources < <(get_stream_lines)
+
+  read -rp "Number(s) to restart (comma-separated, e.g., 1,3): " sel < /dev/tty
+  IFS=',' read -ra CHOSEN <<<"$sel"
+
+  if [ "${#CHOSEN[@]}" -eq 0 ]; then
+    echo "❌ No selection."
+    pause
+    return
+  fi
+
+  read -rp "⚠️  Confirm restarting the selected FFmpeg service(s)? (y/N): " ans < /dev/tty
+  [[ "$ans" =~ ^[Yy]$ ]] || { echo "🟡 Skipped restart."; pause; return; }
+
+  for n in "${CHOSEN[@]}"; do
+    entry="${sources[$((n-1))]}"
+    id="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
+    if [ -z "$id" ]; then
+      echo "⚠️  Could not parse a valid Stream ID for item '$n'. Skipping."
+      continue
+    fi
+    svc="$(service_name_for "$id")"
+    echo "🔁 Restarting $svc …"
+    if systemctl restart "$svc"; then
+      st=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+      echo "✅ $svc status: $st"
+    else
+      echo "❌ Failed to restart $svc. Check: journalctl -u $svc -n 50 --no-pager"
+    fi
+  done
+  echo ""
+  pause
+}
+
+##
+# services_menu
+# Submenu that centralizes service management tasks: view statuses and
+# optionally restart Snapserver or FFmpeg services (all or selected).
+##
+services_menu(){
+  local opt
+  while true; do
+    clear
+    echo "──────────────── SERVICES ─────────────────"
+    echo "1) View Snapserver status"
+    echo "2) View status of FFmpeg services"
+    echo "3) Restart Snapserver (optional)"
+    echo "4) Restart specific FFmpeg services (optional)"
+    echo "5) Restart ALL FFmpeg services (optional)"
+    echo "6) Logs & Watchdog Settings"
+    echo "7) Back"
+    read -rp "Choose [1-7]: " opt < /dev/tty
+    case "$opt" in
+      1) monitor_snapserver ;;
+      2) check_activity ;;
+      3) restart_snapserver_with_confirm ;;
+      4) restart_selected_ffmpeg_services ;;
+      5) restart_all_ffmpeg_services ;;
+      6) logs_and_watchdog_menu ;;
+      7) return ;;
+      *) ;;
+    esac
+  done
 }
 
 enable_watchdog_for_existing(){
@@ -969,6 +1166,8 @@ main_menu(){
   detect_lxc
   [[ "$LXC_MODE" -eq 1 ]] && lxc_instructions
   ensure_silence_fallback
+  ensure_default_pipe_sources
+  ensure_default_metastreams
   ensure_watchdog_templates
   ensure_logrotate
 
@@ -979,7 +1178,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v2025.10.65 (Final Stable Release)"
+    echo "  🧩 SNAPSTREAM MANAGER v2025.10.66 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -991,7 +1190,7 @@ main_menu(){
     echo "         ─── System & Clients ───"
     echo "5) Client Management"
     echo "6) Backups (Create/Restore)"
-    echo "S) Check Snapserver Status"
+    echo "S) Services (Status/Restart)"
     echo "         ─── Maintenance ───"
     echo "7) Activate Watchdog for all streams"
     echo "8) Check Watchdog status"
@@ -1010,7 +1209,7 @@ main_menu(){
       7) enable_watchdog_for_existing;;
       8) check_watchdog_status;;
       9) restart_all_ffmpeg_services;;
-      S|s) monitor_snapserver;;
+      S|s) services_menu;;
       T|t) add_timeout_to_streams;;
       0) exit 0;;
       *) ;;
@@ -1019,3 +1218,121 @@ main_menu(){
 }
 
 main_menu
+##
+# view_logs_snapserver
+# Lets the user choose how many lines to show (default 50) and tails the
+# Snapserver journal logs.
+##
+view_logs_snapserver(){
+  local lines
+  read -rp "Lines to show (default 50): " lines < /dev/tty
+  lines=${lines:-50}
+  echo ""
+  echo "📜 Snapserver logs (last ${lines} lines):"
+  journalctl -u snapserver -n "$lines" --no-pager || echo "❌ Could not read snapserver logs"
+  echo ""
+  pause
+}
+
+##
+# view_logs_ffmpeg_service
+# Shows the journal logs for a specific FFmpeg service selected by the user.
+##
+view_logs_ffmpeg_service(){
+  show_streams_numbered || { pause; return; }
+  local sel entry id svc lines
+  mapfile -t sources < <(get_stream_lines)
+  read -rp "Number to view logs: " sel < /dev/tty
+  entry="${sources[$((sel-1))]}"
+  id="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
+  [ -z "$id" ] && { echo "❌ Invalid selection"; pause; return; }
+  svc="ffmpeg-${id}.service"
+  read -rp "Lines to show (default 50): " lines < /dev/tty
+  lines=${lines:-50}
+  echo ""
+  echo "📜 Logs for ${svc} (last ${lines} lines):"
+  journalctl -u "$svc" -n "$lines" --no-pager || echo "❌ Could not read logs for $svc"
+  echo ""
+  pause
+}
+
+##
+# view_logs_watchdog
+# Shows the journal logs for the watchdog timer/service for a selected stream.
+##
+view_logs_watchdog(){
+  show_streams_numbered || { pause; return; }
+  local sel entry id timer svc lines
+  mapfile -t sources < <(get_stream_lines)
+  read -rp "Number to view watchdog logs: " sel < /dev/tty
+  entry="${sources[$((sel-1))]}"
+  id="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
+  [ -z "$id" ] && { echo "❌ Invalid selection"; pause; return; }
+  timer="ffmpeg-watchdog@${id}.timer"
+  svc="ffmpeg-watchdog@${id}.service"
+  read -rp "Lines to show (default 50): " lines < /dev/tty
+  lines=${lines:-50}
+  echo ""
+  echo "📜 Watchdog timer logs (${timer}) (last ${lines} lines):"
+  journalctl -u "$timer" -n "$lines" --no-pager || echo "⚠️  No timer logs for ${timer}"
+  echo ""
+  echo "📜 Watchdog service logs (${svc}) (last ${lines} lines):"
+  journalctl -u "$svc" -n "$lines" --no-pager || echo "⚠️  No service logs for ${svc}"
+  echo ""
+  pause
+}
+
+##
+# configure_watchdog_thresholds
+# Allows the user to configure and persist watchdog thresholds. Writes to
+# /etc/snapserver.d/snapstream-watchdog.conf and reloads systemd.
+##
+configure_watchdog_thresholds(){
+  echo ""
+  echo "⚙️  Configure Watchdog thresholds"
+  local stale uptime pattern
+  read -rp "Seconds without log update to consider frozen (default 90): " stale < /dev/tty
+  read -rp "Minimum uptime before considering freeze (default 120): " uptime < /dev/tty
+  read -rp "Error pattern regex (leave empty for default): " pattern < /dev/tty
+  stale=${stale:-90}
+  uptime=${uptime:-120}
+  pattern=${pattern:-"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"}
+
+  mkdir -p "$(dirname "$WATCHDOG_CONF")"
+  cat > "$WATCHDOG_CONF" <<EOF
+# Snapstream Watchdog configuration (user-defined)
+LOG_STALE_SECONDS=${stale}
+MIN_UPTIME_SECONDS=${uptime}
+ERROR_PATTERN_REGEX="${pattern}"
+EOF
+  echo "✅ Watchdog configuration saved to ${WATCHDOG_CONF}"
+  systemctl daemon-reload
+  echo ""
+  pause
+}
+
+##
+# logs_and_watchdog_menu
+# Submenu to view logs and configure watchdog detection times.
+##
+logs_and_watchdog_menu(){
+  local opt
+  while true; do
+    clear
+    echo "──────────── Logs & Watchdog ────────────"
+    echo "1) View Snapserver logs"
+    echo "2) View FFmpeg service logs (select one)"
+    echo "3) View Watchdog logs (select one)"
+    echo "4) Configure Watchdog detection thresholds"
+    echo "5) Back"
+    read -rp "Choose [1-5]: " opt < /dev/tty
+    case "$opt" in
+      1) view_logs_snapserver ;;
+      2) view_logs_ffmpeg_service ;;
+      3) view_logs_watchdog ;;
+      4) configure_watchdog_thresholds ;;
+      5) return ;;
+      *) ;;
+    esac
+  done
+}
