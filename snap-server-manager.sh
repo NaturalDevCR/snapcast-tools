@@ -54,7 +54,11 @@ lxc_instructions(){
   local use_hw
   echo ""
   echo "─────────────────────────────────────────────"
-  echo "   🧠 RUNNING IN LXC CONTAINER DETECTED"
+  if [[ "${LXC_MODE:-0}" -eq 1 ]]; then
+    echo "   🧠 RUNNING IN LXC CONTAINER DETECTED"
+  else
+    echo "   🧠 Host/VM environment detected"
+  fi
   echo "─────────────────────────────────────────────"
   echo "Snapserver can run in two modes:"
   echo " 1) 🟢 Orchestration only (typical) → Does NOT require /dev/snd"
@@ -315,7 +319,6 @@ ensure_silence_fallback(){
 
   # Add or replace the global silence process source inside [stream]
   local tmp_conf; tmp_conf="$(mktemp)"
-  trap 'rm -f "$tmp_conf"' RETURN
   local silence_line="source = process:///usr/bin/ffmpeg?name=Silence&codec=null&sampleformat=48000:16:2&params=-f lavfi -i anullsrc=r=48000:cl=stereo -f s16le -ar 48000 -ac 2 -"
 
   awk -v new_line="$silence_line" '
@@ -336,6 +339,7 @@ ensure_silence_fallback(){
   ' "$CONF_FILE" > "$tmp_conf"
 
   mv "$tmp_conf" "$CONF_FILE"
+  rm -f "$tmp_conf"
   chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
   echo "✅ Silence global agregado/actualizado en la sección [stream]."
   echo ""
@@ -627,7 +631,6 @@ ffmpeg_cmd_for(){
 add_or_replace_stream_line(){
   local fifo="$1" name="$2" sample="48000:16:2"
   local tmp_conf; tmp_conf="$(mktemp)"
-  trap 'rm -f "$tmp_conf"' RETURN
 
   local new_line="source = pipe:///${fifo}?name=${name}&codec=null&sampleformat=${sample}"
 
@@ -661,6 +664,7 @@ add_or_replace_stream_line(){
   ' "$CONF_FILE" > "$tmp_conf"
 
   mv "$tmp_conf" "$CONF_FILE"
+  rm -f "$tmp_conf"
   chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
 }
 
@@ -677,7 +681,6 @@ add_or_replace_stream_line(){
 add_or_replace_metastream_line(){
   local source_name="$1" meta_name="$2" sample="48000:16:2"
   local tmp_conf; tmp_conf="$(mktemp)"
-  trap 'rm -f "$tmp_conf"' RETURN
 
   local new_line="source = meta:///${source_name}/Silence?name=${meta_name}&codec=pcm&sampleformat=${sample}"
 
@@ -705,6 +708,7 @@ add_or_replace_metastream_line(){
   ' "$CONF_FILE" > "$tmp_conf"
 
   mv "$tmp_conf" "$CONF_FILE"
+  rm -f "$tmp_conf"
   chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
 }
 
@@ -734,13 +738,21 @@ ensure_default_pipe_sources(){
 
 # Ensure default metastreams referencing Silence fallback
 ##
-# ensure_default_metastreams
-# Creates/updates the user-facing MetaStreams for each source, pointing to
-# `<SourceName>/Silence` with `codec=pcm`.
-#
-# Why: Presents proper names to users and guarantees Silence fallback.
-##
+/**
+ * ensure_default_metastreams
+ * Creates/updates the user-facing MetaStreams for each raw pipe source, pointing to
+ * `meta:///<SourceName>/Silence` with `codec=pcm` and `sampleformat=48000:16:2`.
+ *
+ * Why: Presents meaningful names to users and guarantees Silence fallback.
+ */
 ensure_default_metastreams(){
+  # Guard: require global Silence to exist in [stream] before creating MetaStreams
+  if ! grep -qE '^\s*source\s*=\s*process:///usr/bin/ffmpeg.*name=Silence' "$CONF_FILE"; then
+    echo "⚠️  Global 'Silence' source not found in [stream]."
+    echo "    Run 'Configuration → Ensure global Silence source' first."
+    pause
+    return
+  fi
   echo "🧩 Ensuring default metastreams (codec=pcm, Silence fallback)…"
   add_or_replace_metastream_line "PC-FrontDesk" "FrontDesk"
   add_or_replace_metastream_line "PC-Aracari" "Aracari"
@@ -1058,7 +1070,6 @@ add_timeout_to_streams(){
     echo ""
     echo "⚙️  Checking streams for missing 'timeout' parameter..."
     local temp_conf; temp_conf=$(mktemp)
-    trap 'rm -f "$temp_conf"' RETURN
     
     local modified=0
     # Process the file, adding timeout=5 if it's a pipe source and doesn't have it
@@ -1080,10 +1091,11 @@ add_timeout_to_streams(){
         echo "✅ Found and patched streams. A backup of your old config is at ${CONF_FILE}.bak"
         cp "$CONF_FILE" "${CONF_FILE}.bak"
         mv "$temp_conf" "$CONF_FILE"
-        echo "🔁 Restarting Snapserver to apply changes..."
-        systemctl restart snapserver
+        rm -f "$temp_conf"
+        echo "ℹ️ Changes applied. Use Services menu to restart if desired."
     else
         echo "✅ All pipe streams already have the timeout parameter. No changes needed."
+        rm -f "$temp_conf"
     fi
     pause
 }
@@ -1164,10 +1176,10 @@ main_menu(){
 
   ensure_prereqs
   detect_lxc
-  [[ "$LXC_MODE" -eq 1 ]] && lxc_instructions
-  ensure_silence_fallback
-  ensure_default_pipe_sources
-  ensure_default_metastreams
+  # Initial configuration previously auto-run is now optional via Configuration menu
+  # ensure_silence_fallback
+  # ensure_default_pipe_sources
+  # ensure_default_metastreams
   ensure_watchdog_templates
   ensure_logrotate
 
@@ -1191,6 +1203,7 @@ main_menu(){
     echo "5) Client Management"
     echo "6) Backups (Create/Restore)"
     echo "S) Services (Status/Restart)"
+    echo "C) Configuration (Silence & Defaults, LXC help)"
     echo "         ─── Maintenance ───"
     echo "7) Activate Watchdog for all streams"
     echo "8) Check Watchdog status"
@@ -1210,6 +1223,7 @@ main_menu(){
       8) check_watchdog_status;;
       9) restart_all_ffmpeg_services;;
       S|s) services_menu;;
+      C|c) configuration_menu;;
       T|t) add_timeout_to_streams;;
       0) exit 0;;
       *) ;;
@@ -1331,6 +1345,38 @@ logs_and_watchdog_menu(){
       2) view_logs_ffmpeg_service ;;
       3) view_logs_watchdog ;;
       4) configure_watchdog_thresholds ;;
+      5) return ;;
+      *) ;;
+    esac
+  done
+}
+# ────────────────────────────────────────────────────────────────────────────
+# Configuration Menu (manual actions)
+# ────────────────────────────────────────────────────────────────────────────
+/**
+ * configuration_menu
+ * Provides manual configuration actions: LXC/local capture help, ensuring global Silence,
+ * declaring default pipe sources, and creating default MetaStreams.
+ */
+configuration_menu(){
+  local opt
+  while true; do
+    clear
+    echo "═══════════════════════════════════════════════════"
+    echo "  ⚙️  Configuration"
+    echo "═══════════════════════════════════════════════════"
+    echo "1) LXC / Local capture instructions"
+    echo "2) Ensure global Silence source"
+    echo "3) Ensure default pipe sources"
+    echo "4) Ensure default MetaStreams (Silence fallback)"
+    echo "5) Back"
+    echo "═══════════════════════════════════════════════════"
+    read -rp "Choose an option: " opt < /dev/tty
+    case "$opt" in
+      1) detect_lxc; lxc_instructions ;;
+      2) ensure_silence_fallback ;;
+      3) ensure_default_pipe_sources ;;
+      4) ensure_default_metastreams ;;
       5) return ;;
       *) ;;
     esac
