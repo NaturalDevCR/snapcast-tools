@@ -1035,6 +1035,10 @@ enable_watchdog_for_existing(){
       [ -e "$svc" ] || continue
       local base id
       base=$(basename "$svc")
+      # Skip watchdog template/service files themselves
+      if [[ "$base" == ffmpeg-watchdog@.service ]]; then
+        continue
+      fi
       id=${base#ffmpeg-}
       id=${id%.service}
       echo "  -> Processing Stream ID: '${id}'"
