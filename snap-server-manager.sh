@@ -458,7 +458,13 @@ clients_menu(){
 # sources, excluding MetaStreams and the Silence process.
 ##
 get_stream_lines(){
-  sed -n '/^\[stream\]/,/^\[/p' "$CONF_FILE" | grep -E '^\s*source\s*=\s*pipe:'
+  # Use awk to reliably return all pipe sources inside the [stream] section
+  awk '
+    BEGIN { in_stream = 0 }
+    /^\[stream\]/ { in_stream = 1; next }
+    /^\[/ { if (in_stream) in_stream = 0 }
+    in_stream && /^\s*source\s*=\s*pipe:/ { print }
+  ' "$CONF_FILE"
 }
 
 show_streams_numbered(){
@@ -1020,29 +1026,45 @@ enable_watchdog_for_existing(){
   echo ""
   echo "🛡️  Scanning for existing streams to enable watchdog..."
   local count=0
-  
   systemctl daemon-reload
 
-  while IFS= read -r line; do
-    local STREAM_ID
-    STREAM_ID=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+  # Prefer enumerating installed FFmpeg services to avoid relying on conf parsing
+  if compgen -G "${SYSTEMD_DIR}/ffmpeg-*.service" > /dev/null; then
+    for svc in "${SYSTEMD_DIR}"/ffmpeg-*.service; do
+      [ -e "$svc" ] || continue
+      local base id
+      base=$(basename "$svc")
+      id=${base#ffmpeg-}
+      id=${id%.service}
+      echo "  -> Processing Stream ID: '${id}'"
+      if ! output=$(systemctl enable --now "ffmpeg-watchdog@${id}.timer" 2>&1); then
+        echo "     ❌ FAILED to activate watchdog. Systemd error:"
+        echo "     ${output}"
+      else
+        echo "     ✅ Watchdog timer is active."
+      fi
+      ((count++))
+    done
+  else
+    # Fallback to parsing pipe sources from configuration
+    while IFS= read -r line; do
+      local STREAM_ID
+      STREAM_ID=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+      if [ -z "$STREAM_ID" ]; then
+        echo "  -> ⚠️  Could not parse a valid Stream ID from line: ${line}. Skipping."
+        continue
+      fi
+      echo "  -> Processing Stream ID: '${STREAM_ID}'"
+      if ! output=$(systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" 2>&1); then
+        echo "     ❌ FAILED to activate watchdog. Systemd error:"
+        echo "     ${output}"
+      else
+        echo "     ✅ Watchdog timer is active."
+      fi
+      ((count++))
+    done < <(get_stream_lines)
+  fi
 
-    if [ -z "$STREAM_ID" ]; then
-      echo "  -> ⚠️  Could not parse a valid Stream ID from line: ${line}. Skipping."
-      continue
-    fi
-    
-    echo "  -> Processing Stream ID: '${STREAM_ID}'"
-    
-    if ! output=$(systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" 2>&1); then
-      echo "     ❌ FAILED to activate watchdog. Systemd error:"
-      echo "     ${output}"
-    else
-      echo "     ✅ Watchdog timer is active."
-    fi
-    ((count++))
-  done < <(get_stream_lines)
-  
   echo ""
   echo "✅ Finished processing ${count} stream(s)."
   pause
@@ -1066,39 +1088,11 @@ check_watchdog_status(){
   pause
 }
 
-add_timeout_to_streams(){
-    echo ""
-    echo "⚙️  Checking streams for missing 'timeout' parameter..."
-    local temp_conf; temp_conf=$(mktemp)
-    
-    local modified=0
-    # Process the file, adding timeout=5 if it's a pipe source and doesn't have it
-    awk '
-    /^\[stream\]/ {in_stream=1}
-    /^\[/ && !/^\[stream\]/ {in_stream=0}
-    in_stream && /^\s*source\s*=\s*pipe:/ && !/timeout=/ {
-        print $0 "&timeout=5";
-        modified++;
-        next;
-    }
-    {print}
-    END {
-        exit (modified > 0 ? 0 : 1)
-    }
-    ' "$CONF_FILE" > "$temp_conf"
-    
-    if [ $? -eq 0 ]; then
-        echo "✅ Found and patched streams. A backup of your old config is at ${CONF_FILE}.bak"
-        cp "$CONF_FILE" "${CONF_FILE}.bak"
-        mv "$temp_conf" "$CONF_FILE"
-        rm -f "$temp_conf"
-        echo "ℹ️ Changes applied. Use Services menu to restart if desired."
-    else
-        echo "✅ All pipe streams already have the timeout parameter. No changes needed."
-        rm -f "$temp_conf"
-    fi
-    pause
-}
+##
+# (Removed) add_timeout_to_streams
+# This function was deprecated per user request and removed to avoid
+# modifying the stream URIs with a timeout parameter.
+##
 
 
 restart_all_ffmpeg_services(){
@@ -1204,12 +1198,11 @@ main_menu(){
     echo "6) Backups (Create/Restore)"
     echo "S) Services (Status/Restart)"
     echo "C) Configuration (Silence & Defaults, LXC help)"
-    echo "         ─── Maintenance ───"
-    echo "7) Activate Watchdog for all streams"
-    echo "8) Check Watchdog status"
-    echo "9) Restart all FFmpeg services"
-    echo "T) Add Timeout parameter to streams (for fallback)"
-    echo "0) Exit"
+  echo "         ─── Maintenance ───"
+  echo "7) Activate Watchdog for all streams"
+  echo "8) Check Watchdog status"
+  echo "9) Restart all FFmpeg services"
+  echo "0) Exit"
     echo "═══════════════════════════════════════════════════"
     read -rp "Choose an option: " opt < /dev/tty
     case "$opt" in
@@ -1224,14 +1217,13 @@ main_menu(){
       9) restart_all_ffmpeg_services;;
       S|s) services_menu;;
       C|c) configuration_menu;;
-      T|t) add_timeout_to_streams;;
       0) exit 0;;
       *) ;;
     esac
   done
 }
 
-main_menu
+# Defer main menu start until all functions are defined
 ##
 # view_logs_snapserver
 # Lets the user choose how many lines to show (default 50) and tails the
@@ -1350,6 +1342,7 @@ logs_and_watchdog_menu(){
     esac
   done
 }
+
 # ────────────────────────────────────────────────────────────────────────────
 # Configuration Menu (manual actions)
 # ────────────────────────────────────────────────────────────────────────────
@@ -1382,3 +1375,6 @@ configuration_menu(){
     esac
   done
 }
+
+# Start the main menu loop now that all functions are defined
+main_menu
