@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.9
+# SNAPSTREAM MANAGER v1.0.10
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -1267,7 +1267,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.9 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.10 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -1454,6 +1454,17 @@ logs_and_watchdog_menu(){
   done
 }
 
+force_refresh_watchdog_templates(){
+  local w_service="${SYSTEMD_DIR}/ffmpeg-watchdog@.service"
+  local w_timer="${SYSTEMD_DIR}/ffmpeg-watchdog@.timer"
+  local w_exec="/usr/local/bin/snap_ffmpeg_watchdog.sh"
+  rm -f "$w_service" "$w_timer" "$w_exec" 2>/dev/null || true
+  ensure_watchdog_templates
+  systemctl daemon-reload
+  echo "✅ Watchdog templates refreshed."
+  pause
+}
+
 # ────────────────────────────────────────────────────────────────────────────
 # Configuration Menu (manual actions)
 # ────────────────────────────────────────────────────────────────────────────
@@ -1489,13 +1500,3 @@ configuration_menu(){
 
 # Start the main menu loop now that all functions are defined
 main_menu
-force_refresh_watchdog_templates(){
-  local w_service="${SYSTEMD_DIR}/ffmpeg-watchdog@.service"
-  local w_timer="${SYSTEMD_DIR}/ffmpeg-watchdog@.timer"
-  local w_exec="/usr/local/bin/snap_ffmpeg_watchdog.sh"
-  rm -f "$w_service" "$w_timer" "$w_exec" 2>/dev/null || true
-  ensure_watchdog_templates
-  systemctl daemon-reload
-  echo "✅ Watchdog templates refreshed."
-  pause
-}
