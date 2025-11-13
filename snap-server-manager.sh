@@ -36,7 +36,7 @@ mkdir -p "$BACKUP_DIR" "$CACHE_DIR" "$LOG_DIR"
 chown "$SNAP_USER:$SNAP_GROUP" "$LOG_DIR"
 
 # --- Utility Functions ---
-pause(){ read -rp "Press Enter to continue..."; }
+pause(){ read -rp "Press Enter to continue..." < /dev/tty; }
 ts(){ date +"%Y-%m-%d_%H-%M-%S"; }
 escape_sed(){ sed -e 's/[\/&]/\\&/g' <<<"$1"; }
 
