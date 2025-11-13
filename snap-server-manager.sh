@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.3
+# SNAPSTREAM MANAGER v1.0.4
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -1298,7 +1298,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.3 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.4 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -1398,6 +1398,22 @@ view_logs_watchdog(){
   pause
 }
 
+clear_watchdog_logs_selected(){
+  show_streams_numbered || { pause; return; }
+  local sel entry id log
+  mapfile -t sources < <(get_stream_lines)
+  read -rp "Number to clear watchdog log: " sel < /dev/tty
+  entry="${sources[$((sel-1))]}"
+  id="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
+  [ -z "$id" ] && { echo "❌ Invalid selection"; pause; return; }
+  log="$(log_file_for "$id")"
+  mkdir -p "$(dirname "$log")"
+  : > "$log"
+  echo "✅ Watchdog log cleared for '${id}': $log"
+  echo ""
+  pause
+}
+
 ##
 # configure_watchdog_thresholds
 # Allows the user to configure and persist watchdog thresholds. Writes to
@@ -1446,8 +1462,9 @@ logs_and_watchdog_menu(){
     echo "8) Check Watchdog status (all streams)"
     echo "9) Enable Watchdog for all streams"
     echo "10) Configure Watchdog detection thresholds"
-    echo "11) Back"
-    read -rp "Choose [1-11]: " opt < /dev/tty
+    echo "11) Clear Watchdog logs (select one)"
+    echo "12) Back"
+    read -rp "Choose [1-12]: " opt < /dev/tty
     case "$opt" in
       1) view_logs_snapserver ;;
       2) view_logs_ffmpeg_service ;;
@@ -1459,7 +1476,8 @@ logs_and_watchdog_menu(){
       8) check_watchdog_status_all ;;
       9) enable_watchdog_for_all_safe ;;
       10) configure_watchdog_thresholds ;;
-      11) return ;;
+      11) clear_watchdog_logs_selected ;;
+      12) return ;;
       *) ;;
     esac
   done
