@@ -1301,6 +1301,7 @@ main_menu(){
   # ensure_default_pipe_sources
   # ensure_default_metastreams
   ensure_watchdog_templates
+  systemctl daemon-reload
   ensure_logrotate
 
   local opt
