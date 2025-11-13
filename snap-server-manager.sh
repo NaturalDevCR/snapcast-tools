@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.7
+# SNAPSTREAM MANAGER v1.0.8
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -33,7 +33,7 @@ SILENCE_FIFO="$SNAP_FIFO_DIR/silence.fifo"
 SILENCE_SERVICE="$SYSTEMD_DIR/snap-silence.service"
 
 mkdir -p "$BACKUP_DIR" "$CACHE_DIR" "$LOG_DIR"
-chown "$SNAP_USER:$SNAP_GROUP" "$LOG_DIR"
+chown "$SNAP_USER:$SNAP_GROUP" "$LOG_DIR" 2>/dev/null || true
 
 # --- Utility Functions ---
 pause(){ read -rp "Press Enter to continue..." < /dev/tty; }
@@ -350,13 +350,11 @@ ensure_silence_fallback(){
 # JSON-RPC: Client Management
 # ────────────────────────────────────────────────────────────────────────────
 rpc(){
-    local response error_message
-    response=$(curl --fail -s --connect-timeout 5 -H 'Content-Type: application/json' -X POST "$SNAP_RPC" -d "$1" 2> >(error_message=$(cat); echo "$error_message" >&2))
+    local response
+    response=$(curl --fail -s --connect-timeout 5 -H 'Content-Type: application/json' -X POST "$SNAP_RPC" -d "$1" 2>&1)
     if [ $? -ne 0 ]; then
         echo "RPC_ERROR: Failed to communicate with Snapserver on ${SNAP_RPC}." >&2
-        if [ -n "$error_message" ]; then
-            echo "curl error: ${error_message}" >&2
-        fi
+        echo "curl error: ${response}" >&2
         return 1
     fi
     echo "$response"
@@ -539,9 +537,6 @@ UNIT="ffmpeg-${INSTANCE}.service"
 LOG="/var/log/ffmpeg/ffmpeg-${INSTANCE}.log"
 FIFO="/var/lib/snapserver/fifo/snapfifo_${INSTANCE}"
 REASON=""
-if [ -f "/etc/snapserver.d/snapstream-watchdog.conf" ]; then
-  . "/etc/snapserver.d/snapstream-watchdog.conf"
-fi
 LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-90}"
 MIN_UPTIME_SECONDS="${MIN_UPTIME_SECONDS:-120}"
 ERROR_PATTERN_REGEX="${ERROR_PATTERN_REGEX:-"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"}"
@@ -553,22 +548,25 @@ elif [ ! -p "${FIFO}" ]; then
 elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q "${ERROR_PATTERN_REGEX}"; then
   REASON="detected critical error pattern in logs"
 elif [ -f "${LOG}" ]; then
-  LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
-  if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then
-     ACTIVE_SINCE_BOOT=$(systemctl show ${UNIT} -p ActiveEnterTimestampMonotonic --value)
-     UPTIME=$(awk '{print int($1)}' /proc/uptime)
-     if [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then
-        REASON="process appears frozen (log not updated in ${LAST_UPDATE}s)"
-     fi
+  if [ -s "${LOG}" ] && [ "${LOG_STALE_SECONDS}" -gt 0 ] 2>/dev/null; then
+    LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
+    if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then
+       ACTIVE_SINCE_BOOT=$(systemctl show "${UNIT}" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
+       UPTIME=$(awk '{print int($1)}' /proc/uptime)
+       if [[ "${ACTIVE_SINCE_BOOT}" -gt 0 ]] && [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then
+          REASON="process appears frozen (log not updated in ${LAST_UPDATE}s, non-empty log)"
+       fi
+    fi
   fi
 fi
 
 if [ -n "${REASON}" ]; then
-  echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}." >> "${LOG}"
+  if [ -f "${LOG}" ]; then mv "${LOG}" "${LOG}.prev.$(date +%s)" 2>/dev/null || true; fi
   systemctl restart "${UNIT}"
   sleep 1
   : > "${LOG}"
-  echo "[WATCHDOG] Log for ${INSTANCE} has been cleared." >> "${LOG}"
+  chown snapserver:snapserver "${LOG}" 2>/dev/null || true
+  echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}." >> "${LOG}"
 fi
 EOF
     chmod 0755 "$w_exec"
@@ -715,9 +713,10 @@ add_or_replace_metastream_line(){
           }
           in_stream_section = 0;
       }
-      in_stream_section && $0 ~ "^\\s*source\\s*=\\s*meta:///" src_name "/Silence" {
-          if (!replaced) { print new_line; replaced = 1; }
-          next;
+      in_stream_section {
+          if (!replaced && index($0, "source = meta:///" src_name "/Silence") > 0) {
+              print new_line; replaced = 1; next;
+          }
       }
       { print; }
       END {
@@ -1035,55 +1034,7 @@ services_menu(){
 }
 
 enable_watchdog_for_existing(){
-  echo ""
-  echo "🛡️  Scanning for existing streams to enable watchdog..."
-  local count=0
-  systemctl daemon-reload
-
-  # Prefer enumerating installed FFmpeg services to avoid relying on conf parsing
-  if compgen -G "${SYSTEMD_DIR}/ffmpeg-*.service" > /dev/null; then
-    for svc in "${SYSTEMD_DIR}"/ffmpeg-*.service; do
-      [ -e "$svc" ] || continue
-      local base id
-      base=$(basename "$svc")
-      # Skip watchdog template/service files themselves
-      if [[ "$base" == ffmpeg-watchdog@.service ]]; then
-        continue
-      fi
-      id=${base#ffmpeg-}
-      id=${id%.service}
-      echo "  -> Processing Stream ID: '${id}'"
-      if ! output=$(systemctl enable --now "ffmpeg-watchdog@${id}.timer" 2>&1); then
-        echo "     ❌ FAILED to activate watchdog. Systemd error:"
-        echo "     ${output}"
-      else
-        echo "     ✅ Watchdog timer is active."
-      fi
-      ((count++))
-    done
-  else
-    # Fallback to parsing pipe sources from configuration
-    while IFS= read -r line; do
-      local STREAM_ID
-      STREAM_ID=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
-      if [ -z "$STREAM_ID" ]; then
-        echo "  -> ⚠️  Could not parse a valid Stream ID from line: ${line}. Skipping."
-        continue
-      fi
-      echo "  -> Processing Stream ID: '${STREAM_ID}'"
-      if ! output=$(systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" 2>&1); then
-        echo "     ❌ FAILED to activate watchdog. Systemd error:"
-        echo "     ${output}"
-      else
-        echo "     ✅ Watchdog timer is active."
-      fi
-      ((count++))
-    done < <(get_stream_lines)
-  fi
-
-  echo ""
-  echo "✅ Finished processing ${count} stream(s)."
-  pause
+  enable_watchdog_for_all_safe
 }
 
 ##
@@ -1311,7 +1262,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.7 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.8 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -1477,7 +1428,8 @@ logs_and_watchdog_menu(){
     echo "10) Configure Watchdog detection thresholds"
     echo "11) Clear Watchdog logs (select one)"
     echo "12) Back"
-    read -rp "Choose [1-12]: " opt < /dev/tty
+    echo "13) Force refresh Watchdog templates"
+    read -rp "Choose [1-13]: " opt < /dev/tty
     case "$opt" in
       1) view_logs_snapserver ;;
       2) view_logs_ffmpeg_service ;;
@@ -1491,6 +1443,7 @@ logs_and_watchdog_menu(){
       10) configure_watchdog_thresholds ;;
       11) clear_watchdog_logs_selected ;;
       12) return ;;
+      13) force_refresh_watchdog_templates ;;
       *) ;;
     esac
   done
@@ -1531,3 +1484,13 @@ configuration_menu(){
 
 # Start the main menu loop now that all functions are defined
 main_menu
+force_refresh_watchdog_templates(){
+  local w_service="${SYSTEMD_DIR}/ffmpeg-watchdog@.service"
+  local w_timer="${SYSTEMD_DIR}/ffmpeg-watchdog@.timer"
+  local w_exec="/usr/local/bin/snap_ffmpeg_watchdog.sh"
+  rm -f "$w_service" "$w_timer" "$w_exec" 2>/dev/null || true
+  ensure_watchdog_templates
+  systemctl daemon-reload
+  echo "✅ Watchdog templates refreshed."
+  pause
+}
