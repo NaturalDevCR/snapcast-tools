@@ -1138,6 +1138,50 @@ remove_watchdog_for_selected(){
   pause
 }
 
+check_watchdog_status_all(){
+  echo ""
+  printf "%-24s | %-8s | %-8s\n" "Stream" "Enabled" "Active"
+  printf -- "-------------------------+----------+----------\n"
+  local name id timer_service enabled st
+  while IFS= read -r line; do
+    name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
+    id=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+    timer_service="ffmpeg-watchdog@${id}.timer"
+    enabled=$(systemctl is-enabled "$timer_service" 2>/dev/null || echo "disabled")
+    st=$(systemctl is-active "$timer_service" 2>/dev/null || echo "inactive")
+    printf "%-24s | %-8s | %-8s\n" "$name" "$enabled" "$st"
+  done < <(get_stream_lines)
+  echo ""
+  pause
+}
+
+enable_watchdog_for_all_safe(){
+  echo ""
+  echo "🛡️  Enabling Watchdog timers for all streams..."
+  systemctl daemon-reload
+  local -a ids
+  ids=()
+  local seen
+  seen=""
+  while IFS= read -r line; do
+    local sid
+    sid=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
+    [ -z "$sid" ] && continue
+    if [[ " $seen " != *" $sid "* ]]; then
+      ids+=("$sid")
+      seen+=" $sid"
+    fi
+  done < <(get_stream_lines)
+  if [ ${#ids[@]} -eq 0 ]; then echo "❌ No streams found."; pause; return; fi
+  local id
+  for id in "${ids[@]}"; do
+    systemctl enable --now "ffmpeg-watchdog@${id}.timer" >/dev/null 2>&1 || echo "⚠️  Failed to enable for ${id}"
+  done
+  echo "✅ Completed."
+  echo ""
+  pause
+}
+
 check_watchdog_status(){
   echo ""
   echo "🛡️  Current status of Watchdog timers (enabled only):"
@@ -1399,9 +1443,11 @@ logs_and_watchdog_menu(){
     echo "5) Disable Watchdog for selected stream"
     echo "6) Delete Watchdog for selected stream"
     echo "7) Check Watchdog status"
-    echo "8) Configure Watchdog detection thresholds"
-    echo "9) Back"
-    read -rp "Choose [1-9]: " opt < /dev/tty
+    echo "8) Check Watchdog status (all streams)"
+    echo "9) Enable Watchdog for all streams"
+    echo "10) Configure Watchdog detection thresholds"
+    echo "11) Back"
+    read -rp "Choose [1-11]: " opt < /dev/tty
     case "$opt" in
       1) view_logs_snapserver ;;
       2) view_logs_ffmpeg_service ;;
@@ -1410,8 +1456,10 @@ logs_and_watchdog_menu(){
       5) disable_watchdog_for_selected ;;
       6) remove_watchdog_for_selected ;;
       7) check_watchdog_status ;;
-      8) configure_watchdog_thresholds ;;
-      9) return ;;
+      8) check_watchdog_status_all ;;
+      9) enable_watchdog_for_all_safe ;;
+      10) configure_watchdog_thresholds ;;
+      11) return ;;
       *) ;;
     esac
   done
