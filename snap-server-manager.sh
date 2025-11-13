@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.1
+# SNAPSTREAM MANAGER v1.0.3
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -1140,18 +1140,20 @@ remove_watchdog_for_selected(){
 
 check_watchdog_status(){
   echo ""
-  echo "🛡️  Current status of Watchdog timers:"
-  local i=1
+  echo "🛡️  Current status of Watchdog timers (enabled only):"
+  local count=0
   while IFS= read -r line; do
-    local name id timer_service st
+    local name id timer_service st enabled
     name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
     id=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
     timer_service="ffmpeg-watchdog@${id}.timer"
+    enabled=$(systemctl is-enabled "$timer_service" 2>/dev/null || echo "absent")
+    [ "$enabled" != "enabled" ] && continue
     st=$(systemctl is-active "$timer_service" 2>/dev/null || echo "inactive")
     printf "  • %-22s : %-10s (%s)\n" "'$name'" "$st" "$timer_service"
-    ((i++))
+    ((count++))
   done < <(get_stream_lines)
-  if [ "$i" -eq 1 ]; then echo "No streams configured to check."; fi
+  if [ "$count" -eq 0 ]; then echo "No enabled watchdog timers found."; fi
   echo ""
   pause
 }
@@ -1252,7 +1254,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.2 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.3 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
