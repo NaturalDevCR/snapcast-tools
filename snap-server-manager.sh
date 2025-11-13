@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.10
+# SNAPSTREAM MANAGER v1.0.13
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -543,24 +543,31 @@ ERROR_PATTERN_REGEX="${ERROR_PATTERN_REGEX:-"(Connection timed out|Protocol not 
 
 # sanitize pattern from EnvironmentFile (strip optional surrounding quotes)
 PATTERN="${ERROR_PATTERN_REGEX}"
-PATTERN=${PATTERN#"}
-PATTERN=${PATTERN%"}
+PATTERN=${PATTERN#\"}
+PATTERN=${PATTERN%\"}
 
 if ! systemctl is-active --quiet "${UNIT}"; then
   REASON="service was not active"
 elif [ ! -p "${FIFO}" ]; then
   REASON="FIFO pipe was missing"
-elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q -- "${PATTERN}" 2>/dev/null; then
-  REASON="detected critical error pattern in logs"
 elif [ -f "${LOG}" ]; then
-  if [ -s "${LOG}" ] && [ "${LOG_STALE_SECONDS}" -gt 0 ] 2>/dev/null; then
-    LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
-    if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then
-       ACTIVE_SINCE_BOOT=$(systemctl show "${UNIT}" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
-       UPTIME=$(awk '{print int($1)}' /proc/uptime)
-       if [[ "${ACTIVE_SINCE_BOOT}" -gt 0 ]] && [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then
-          REASON="process appears frozen (log not updated in ${LAST_UPDATE}s, non-empty log)"
-       fi
+  if grep -E -q -- "${PATTERN}" <<<"" 2>/dev/null; then
+    if tail -n 200 "${LOG}" 2>/dev/null | grep -E -q -- "${PATTERN}"; then
+      REASON="detected critical error pattern in logs"
+    fi
+  else
+    echo "[WATCHDOG] WARNING: invalid ERROR_PATTERN_REGEX='${PATTERN}', skipping regex check." >> "${LOG}"
+  fi
+  if [ -z "${REASON}" ]; then
+    if [ -s "${LOG}" ] && [ "${LOG_STALE_SECONDS}" -gt 0 ] 2>/dev/null; then
+      LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
+      if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then
+         ACTIVE_SINCE_BOOT=$(systemctl show "${UNIT}" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
+         UPTIME=$(awk '{print int($1)}' /proc/uptime)
+         if [[ "${ACTIVE_SINCE_BOOT}" -gt 0 ]] && [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then
+            REASON="process appears frozen (log not updated in ${LAST_UPDATE}s, non-empty log)"
+         fi
+      fi
     fi
   fi
 fi
@@ -609,7 +616,7 @@ EOF
   # Ensure watchdog config file exists with defaults
   if [ ! -f "$WATCHDOG_CONF" ]; then
     mkdir -p "$(dirname "$WATCHDOG_CONF")"
-    cat > "$WATCHDOG_CONF" <<EOF
+    cat > "$WATCHDOG_CONF" <<'EOF'
 # Snapstream Watchdog configuration (defaults)
 LOG_STALE_SECONDS=90
 MIN_UPTIME_SECONDS=120
@@ -1267,7 +1274,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.10 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.13 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -1392,19 +1399,19 @@ configure_watchdog_thresholds(){
   echo ""
   echo "⚙️  Configure Watchdog thresholds"
   local stale uptime pattern
-  read -rp "Seconds without log update to consider frozen (default 90): " stale < /dev/tty
+  read -rp "Seconds without log update to consider frozen (default 90, 0 disables): " stale < /dev/tty
   read -rp "Minimum uptime before considering freeze (default 120): " uptime < /dev/tty
   read -rp "Error pattern regex (leave empty for default): " pattern < /dev/tty
   stale=${stale:-90}
   uptime=${uptime:-120}
   pattern=${pattern:-"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"}
-
+  pattern_escaped=${pattern//\"/\\\"}
   mkdir -p "$(dirname "$WATCHDOG_CONF")"
   cat > "$WATCHDOG_CONF" <<EOF
 # Snapstream Watchdog configuration (user-defined)
 LOG_STALE_SECONDS=${stale}
 MIN_UPTIME_SECONDS=${uptime}
-ERROR_PATTERN_REGEX=${pattern}
+ERROR_PATTERN_REGEX="${pattern_escaped}"
 EOF
   echo "✅ Watchdog configuration saved to ${WATCHDOG_CONF}"
   systemctl daemon-reload
