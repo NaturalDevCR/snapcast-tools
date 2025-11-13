@@ -527,6 +527,52 @@ EOF
 ensure_watchdog_templates(){
   local w_service="${SYSTEMD_DIR}/ffmpeg-watchdog@.service"
   local w_timer="${SYSTEMD_DIR}/ffmpeg-watchdog@.timer"
+  local w_exec="/usr/local/bin/snap_ffmpeg_watchdog.sh"
+
+  if [ ! -f "$w_exec" ]; then
+    echo "⚙️ Creating watchdog executor script..."
+    cat > "$w_exec" <<'EOF'
+#!/bin/bash
+set -e
+INSTANCE="$1"
+UNIT="ffmpeg-${INSTANCE}.service"
+LOG="/var/log/ffmpeg/ffmpeg-${INSTANCE}.log"
+FIFO="/var/lib/snapserver/fifo/snapfifo_${INSTANCE}"
+REASON=""
+if [ -f "/etc/snapserver.d/snapstream-watchdog.conf" ]; then
+  . "/etc/snapserver.d/snapstream-watchdog.conf"
+fi
+LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-90}"
+MIN_UPTIME_SECONDS="${MIN_UPTIME_SECONDS:-120}"
+ERROR_PATTERN_REGEX="${ERROR_PATTERN_REGEX:-"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"}"
+
+if ! systemctl is-active --quiet "${UNIT}"; then
+  REASON="service was not active"
+elif [ ! -p "${FIFO}" ]; then
+  REASON="FIFO pipe was missing"
+elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q ${ERROR_PATTERN_REGEX}; then
+  REASON="detected critical error pattern in logs"
+elif [ -f "${LOG}" ]; then
+  LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
+  if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then
+     ACTIVE_SINCE_BOOT=$(systemctl show ${UNIT} -p ActiveEnterTimestampMonotonic --value)
+     UPTIME=$(awk '{print int($1)}' /proc/uptime)
+     if [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then
+        REASON="process appears frozen (log not updated in ${LAST_UPDATE}s)"
+     fi
+  fi
+fi
+
+if [ -n "${REASON}" ]; then
+  echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}." >> "${LOG}"
+  systemctl restart "${UNIT}"
+  sleep 1
+  : > "${LOG}"
+  echo "[WATCHDOG] Log for ${INSTANCE} has been cleared." >> "${LOG}"
+fi
+EOF
+    chmod 0755 "$w_exec"
+  fi
 
   if [ ! -f "$w_service" ]; then
     echo "⚙️ Creating advanced FFmpeg watchdog service template..."
@@ -537,42 +583,8 @@ After=network-online.target
 
 [Service]
 Type=oneshot
+ExecStart=/usr/local/bin/snap_ffmpeg_watchdog.sh %i
 EnvironmentFile=/etc/snapserver.d/snapstream-watchdog.conf
-ExecStart=/bin/bash -c '\
-  set -e; \
-  INSTANCE="%i"; \
-  UNIT="ffmpeg-\${INSTANCE}.service"; \
-  LOG="/var/log/ffmpeg/ffmpeg-\${INSTANCE}.log"; \
-  FIFO="/var/lib/snapserver/fifo/snapfifo_\${INSTANCE}"; \
-  REASON=""; \
-  LOG_STALE_SECONDS="\${LOG_STALE_SECONDS:-90}"; \
-  MIN_UPTIME_SECONDS="\${MIN_UPTIME_SECONDS:-120}"; \
-  ERROR_PATTERN_REGEX="\${ERROR_PATTERN_REGEX:-\"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)\"}"; \
-  \
-  if ! systemctl is-active --quiet "\${UNIT}"; then \
-    REASON="service was not active"; \
-  elif [ ! -p "\${FIFO}" ]; then \
-    REASON="FIFO pipe was missing"; \
-  elif tail -n 200 "\${LOG}" 2>/dev/null | grep -E -q \${ERROR_PATTERN_REGEX}; then \
-    REASON="detected critical error pattern in logs"; \
-  elif [ -f "\${LOG}" ]; then \
-    LAST_UPDATE=\$(( \$(date +%s) - \$(stat -c %Y "\${LOG}" 2>/dev/null || echo \$(date +%s)) )); \
-    if [[ "\${LAST_UPDATE}" -gt "\${LOG_STALE_SECONDS}" ]]; then \
-       ACTIVE_SINCE_BOOT=\$(systemctl show \${UNIT} -p ActiveEnterTimestampMonotonic --value); \
-       UPTIME=\$(awk "{print int(\$1)}" /proc/uptime); \
-       if [[ \$(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "\${MIN_UPTIME_SECONDS}" ]]; then \
-          REASON="process appears frozen (log not updated in \${LAST_UPDATE}s)"; \
-       fi; \
-    fi; \
-  fi; \
-  \
-  if [ -n "\${REASON}" ]; then \
-    echo "[WATCHDOG] Restarting \${UNIT}. Reason: \${REASON}." >> "\${LOG}"; \
-    systemctl restart "\${UNIT}"; \
-    sleep 1; \
-    : > "\${LOG}"; \
-    echo "[WATCHDOG] Log for \${INSTANCE} has been cleared." >> "\${LOG}"; \
-  fi'
 EOF
   fi
 
