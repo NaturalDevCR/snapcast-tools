@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.8
+# SNAPSTREAM MANAGER v1.0.9
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -541,11 +541,16 @@ LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-90}"
 MIN_UPTIME_SECONDS="${MIN_UPTIME_SECONDS:-120}"
 ERROR_PATTERN_REGEX="${ERROR_PATTERN_REGEX:-"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"}"
 
+# sanitize pattern from EnvironmentFile (strip optional surrounding quotes)
+PATTERN="${ERROR_PATTERN_REGEX}"
+PATTERN=${PATTERN#"}
+PATTERN=${PATTERN%"}
+
 if ! systemctl is-active --quiet "${UNIT}"; then
   REASON="service was not active"
 elif [ ! -p "${FIFO}" ]; then
   REASON="FIFO pipe was missing"
-elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q "${ERROR_PATTERN_REGEX}"; then
+elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q -- "${PATTERN}" 2>/dev/null; then
   REASON="detected critical error pattern in logs"
 elif [ -f "${LOG}" ]; then
   if [ -s "${LOG}" ] && [ "${LOG_STALE_SECONDS}" -gt 0 ] 2>/dev/null; then
@@ -1262,7 +1267,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.8 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.9 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
