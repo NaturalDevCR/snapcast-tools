@@ -541,37 +541,37 @@ EnvironmentFile=/etc/snapserver.d/snapstream-watchdog.conf
 ExecStart=/bin/bash -c '\
   set -e; \
   INSTANCE="%i"; \
-  UNIT="ffmpeg-${INSTANCE}.service"; \
-  LOG="/var/log/ffmpeg/ffmpeg-${INSTANCE}.log"; \
-  FIFO="/var/lib/snapserver/fifo/snapfifo_${INSTANCE}"; \
+  UNIT="ffmpeg-$${INSTANCE}.service"; \
+  LOG="/var/log/ffmpeg/ffmpeg-$${INSTANCE}.log"; \
+  FIFO="/var/lib/snapserver/fifo/snapfifo_$${INSTANCE}"; \
   REASON=""; \
-  LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-90}"; \
-  MIN_UPTIME_SECONDS="${MIN_UPTIME_SECONDS:-120}"; \
-  ERROR_PATTERN_REGEX="${ERROR_PATTERN_REGEX:-\"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)\"}"; \
+  LOG_STALE_SECONDS="$${LOG_STALE_SECONDS:-90}"; \
+  MIN_UPTIME_SECONDS="$${MIN_UPTIME_SECONDS:-120}"; \
+  ERROR_PATTERN_REGEX="$${ERROR_PATTERN_REGEX:-\"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)\"}"; \
   \
-  if ! systemctl is-active --quiet "${UNIT}"; then \
+  if ! systemctl is-active --quiet "$${UNIT}"; then \
     REASON="service was not active"; \
-  elif [ ! -p "${FIFO}" ]; then \
+  elif [ ! -p "$${FIFO}" ]; then \
     REASON="FIFO pipe was missing"; \
-  elif tail -n 200 "${LOG}" 2>/dev/null | grep -E -q ${ERROR_PATTERN_REGEX}; then \
+  elif tail -n 200 "$${LOG}" 2>/dev/null | grep -E -q $${ERROR_PATTERN_REGEX}; then \
     REASON="detected critical error pattern in logs"; \
-  elif [ -f "${LOG}" ]; then \
-    LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) )); \
-    if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then \
-       ACTIVE_SINCE_BOOT=$(systemctl show ${UNIT} -p ActiveEnterTimestampMonotonic --value); \
-       UPTIME=$(awk "{print int(\$1)}" /proc/uptime); \
-       if [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then \
-          REASON="process appears frozen (log not updated in ${LAST_UPDATE}s)"; \
+  elif [ -f "$${LOG}" ]; then \
+    LAST_UPDATE=$$(( $$(date +%s) - $$(stat -c %Y "$${LOG}" 2>/dev/null || echo $$(date +%s)) )); \
+    if [[ "$$LAST_UPDATE" -gt "$$LOG_STALE_SECONDS" ]]; then \
+       ACTIVE_SINCE_BOOT=$$(systemctl show $${UNIT} -p ActiveEnterTimestampMonotonic --value); \
+       UPTIME=$$(awk "{print int($$1)}" /proc/uptime); \
+       if [[ $$(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "$${MIN_UPTIME_SECONDS}" ]]; then \
+          REASON="process appears frozen (log not updated in $$LAST_UPDATEs)"; \
        fi; \
     fi; \
   fi; \
   \
-  if [ -n "${REASON}" ]; then \
-    echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}." >> "${LOG}"; \
-    systemctl restart "${UNIT}"; \
+  if [ -n "$${REASON}" ]; then \
+    echo "[WATCHDOG] Restarting $${UNIT}. Reason: $${REASON}." >> "$${LOG}"; \
+    systemctl restart "$${UNIT}"; \
     sleep 1; \
-    > "${LOG}"; \
-    echo "[WATCHDOG] Log for ${INSTANCE} has been cleared." >> "${LOG}"; \
+    > "$${LOG}"; \
+    echo "[WATCHDOG] Log for $${INSTANCE} has been cleared." >> "$${LOG}"; \
   fi'
 EOF
   fi
