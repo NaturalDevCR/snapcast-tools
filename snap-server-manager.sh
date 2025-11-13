@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.6
+# SNAPSTREAM MANAGER v1.0.7
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -610,7 +610,7 @@ EOF
 # Snapstream Watchdog configuration (defaults)
 LOG_STALE_SECONDS=90
 MIN_UPTIME_SECONDS=120
-ERROR_PATTERN_REGEX=(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)
+ERROR_PATTERN_REGEX="(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"
 EOF
   fi
 }
@@ -1311,7 +1311,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.6 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.7 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -1441,7 +1441,7 @@ configure_watchdog_thresholds(){
   read -rp "Error pattern regex (leave empty for default): " pattern < /dev/tty
   stale=${stale:-90}
   uptime=${uptime:-120}
-  pattern=${pattern:-(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)}
+  pattern=${pattern:-"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"}
 
   mkdir -p "$(dirname "$WATCHDOG_CONF")"
   cat > "$WATCHDOG_CONF" <<EOF
