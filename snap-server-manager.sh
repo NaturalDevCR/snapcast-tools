@@ -1101,6 +1101,23 @@ enable_watchdog_for_selected(){
   echo ""
   pause
 }
+ 
+disable_watchdog_for_selected(){
+  show_streams_numbered || { pause; return; }
+  local sel entry id
+  mapfile -t sources < <(get_stream_lines)
+  read -rp "Number to disable watchdog: " sel < /dev/tty
+  entry="${sources[$((sel-1))]}"
+  id="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
+  [ -z "$id" ] && { echo "❌ Invalid selection"; pause; return; }
+  systemctl stop "ffmpeg-watchdog@${id}.timer" 2>/dev/null || true
+  systemctl disable "ffmpeg-watchdog@${id}.timer" 2>/dev/null || true
+  systemctl stop "ffmpeg-watchdog@${id}.service" 2>/dev/null || true
+  systemctl reset-failed "ffmpeg-watchdog@${id}.service" 2>/dev/null || true
+  echo "✅ Watchdog disabled for '${id}'."
+  echo ""
+  pause
+}
 
 check_watchdog_status(){
   echo ""
@@ -1358,18 +1375,20 @@ logs_and_watchdog_menu(){
     echo "2) View FFmpeg service logs (select one)"
     echo "3) View Watchdog logs (select one)"
     echo "4) Enable Watchdog for selected stream"
-    echo "5) Check Watchdog status"
-    echo "6) Configure Watchdog detection thresholds"
-    echo "7) Back"
-    read -rp "Choose [1-7]: " opt < /dev/tty
+    echo "5) Disable Watchdog for selected stream"
+    echo "6) Check Watchdog status"
+    echo "7) Configure Watchdog detection thresholds"
+    echo "8) Back"
+    read -rp "Choose [1-8]: " opt < /dev/tty
     case "$opt" in
       1) view_logs_snapserver ;;
       2) view_logs_ffmpeg_service ;;
       3) view_logs_watchdog ;;
       4) enable_watchdog_for_selected ;;
-      5) check_watchdog_status ;;
-      6) configure_watchdog_thresholds ;;
-      7) return ;;
+      5) disable_watchdog_for_selected ;;
+      6) check_watchdog_status ;;
+      7) configure_watchdog_thresholds ;;
+      8) return ;;
       *) ;;
     esac
   done
