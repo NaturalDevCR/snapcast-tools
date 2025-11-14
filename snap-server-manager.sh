@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.14
+# SNAPSTREAM MANAGER v1.0.15
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -554,7 +554,9 @@ elif [ -f "${LOG}" ]; then
   printf '' | grep -E -q -- "${PATTERN}" 2>/dev/null; rc=$?
   if [ "$rc" -eq 2 ]; then
     echo "[WATCHDOG] WARNING: invalid ERROR_PATTERN_REGEX='${PATTERN}', skipping regex check." >> "${LOG}"
-  else
+    PATTERN=""
+  fi
+  if [ -n "${PATTERN}" ]; then
     if tail -n 200 "${LOG}" 2>/dev/null | grep -E -q -- "${PATTERN}"; then
       REASON="detected critical error pattern in logs"
     fi
@@ -1188,10 +1190,14 @@ check_watchdog_status(){
 restart_all_ffmpeg_services(){
   echo ""
   echo "🔁 Restarting all FFmpeg services..."
-  if ! systemctl restart ffmpeg-*.service; then
-      echo "⚠️  Some services may have failed to restart. Use option 2 to check status."
+  if ! compgen -G "${SYSTEMD_DIR}/ffmpeg-*.service" > /dev/null; then
+    echo "ℹ️  No FFmpeg services found."
   else
-      echo "✅ Restart command sent successfully to all ffmpeg services."
+    if ! systemctl restart ffmpeg-*.service; then
+        echo "⚠️  Some services may have failed to restart. Use option 2 to check status."
+    else
+        echo "✅ Restart command sent successfully to all ffmpeg services."
+    fi
   fi
   echo ""
   pause
@@ -1275,7 +1281,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.14 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.15 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
