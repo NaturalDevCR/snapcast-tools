@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.19
+# SNAPSTREAM MANAGER v1.0.20
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -527,9 +527,9 @@ ensure_watchdog_templates(){
   local w_timer="${SYSTEMD_DIR}/ffmpeg-watchdog@.timer"
   local w_exec="/usr/local/bin/snap_ffmpeg_watchdog.sh"
 
-  if [ ! -f "$w_exec" ]; then
-    echo "⚙️ Creating watchdog executor script..."
-    cat > "$w_exec" <<'EOF'
+  # Always refresh watchdog script (avoid outdated versions)
+  echo "⚙️ Updating watchdog executor script..."
+  cat > "$w_exec" <<'EOF'
 #!/bin/bash
 set -e
 
@@ -550,25 +550,25 @@ PATTERN="${ERROR_PATTERN_REGEX}"
 PATTERN="${PATTERN#\"}"
 PATTERN="${PATTERN%\"}"
 
-# =============================
+# ================================================
 # 1) BASIC HEALTH CHECKS
-# =============================
+# ================================================
 if ! systemctl is-active --quiet "${UNIT}"; then
     REASON="service was not active"
 
-elif [ ! -p "${FIFO}" ]; then
+# Safe check for empty FIFO name or missing pipe
+elif [ -z "$FIFO" ] || [ ! -p "$FIFO" ]; then
     REASON="FIFO pipe was missing"
 
 elif [ -f "${LOG}" ]; then
 
-    # =============================
+    # ================================================
     # 2) CRITICAL ERROR PATTERN CHECK
-    # =============================
+    # ================================================
     if [ -n "${PATTERN}" ]; then
         if ! printf '' | grep -E -q "${PATTERN}" 2>/dev/null; then
-            # Pattern is invalid → disable pattern matching
             PATTERN=""
-            echo "[WATCHDOG] Invalid ERROR_PATTERN_REGEX, skipping regex check." >> "${LOG}"
+            echo "[WATCHDOG] Invalid ERROR_PATTERN_REGEX, disabling pattern match." >> "${LOG}"
         fi
     fi
 
@@ -578,19 +578,18 @@ elif [ -f "${LOG}" ]; then
         fi
     fi
 
-    # =============================
+    # ================================================
     # 3) FFmpeg write_bytes delta check (non-invasive)
-    # =============================
+    # ================================================
     if [ -z "$REASON" ]; then
-        PID=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null || echo 0)
+        PID=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null || echo "")
 
-        # Validate PID is numeric and > 1 (PID 1 = systemd)
+        # PID must be numeric and >1
         if [[ "$PID" =~ ^[0-9]+$ ]] && [ "$PID" -gt 1 ]; then
-            W1=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo 0)
+            W1=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo "")
             sleep 0.5
-            W2=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo 0)
-            
-            # numeric comparison safeguard
+            W2=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo "")
+
             if [[ "$W1" =~ ^[0-9]+$ ]] && [[ "$W2" =~ ^[0-9]+$ ]]; then
                 if [ "$W1" -eq "$W2" ]; then
                     REASON="ffmpeg appears frozen (no write_bytes delta)"
@@ -599,29 +598,33 @@ elif [ -f "${LOG}" ]; then
         fi
     fi
 
-    # =============================
+    # ================================================
     # 4) LOG STALE CHECK
-    # =============================
-    if [ -z "${REASON}" ] && [ "${LOG_STALE_SECONDS}" -gt 0 ] 2>/dev/null; then
-
-        LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
+    # ================================================
+    if [ -z "${REASON}" ] && [[ "${LOG_STALE_SECONDS}" =~ ^[0-9]+$ ]] && [ "${LOG_STALE_SECONDS}" -gt 0 ]; then
+        NOW=$(date +%s)
+        LOG_MTIME=$(stat -c %Y "${LOG}" 2>/dev/null || echo "$NOW")
+        LAST_UPDATE=$(( NOW - LOG_MTIME ))
 
         if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then
             ACTIVE_SINCE_BOOT=$(systemctl show "${UNIT}" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
             UPTIME=$(awk '{print int($1)}' /proc/uptime)
 
-            # Must have been running long enough to be considered "stuck"
-            if [[ "${ACTIVE_SINCE_BOOT}" -gt 0 ]] && \
-               [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then
-                REASON="process appears frozen (log not updated for ${LAST_UPDATE}s)"
+            if [[ "$ACTIVE_SINCE_BOOT" =~ ^[0-9]+$ ]]; then
+                ACTIVE_SEC=$(( ACTIVE_SINCE_BOOT / 1000000 ))
+                RUNTIME=$(( UPTIME - ACTIVE_SEC ))
+
+                if [[ "$RUNTIME" -gt "${MIN_UPTIME_SECONDS}" ]]; then
+                    REASON="process appears frozen (log not updated for ${LAST_UPDATE}s)"
+                fi
             fi
         fi
     fi
 fi
 
-# =============================
+# ================================================
 # 5) EXECUTE RECOVERY IF NEEDED
-# =============================
+# ================================================
 if [ -n "${REASON}" ]; then
     # Archive previous log
     if [ -f "${LOG}" ]; then
@@ -638,6 +641,7 @@ if [ -n "${REASON}" ]; then
 
     echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}." >> "${LOG}"
 fi
+
 
 EOF
     chmod 0755 "$w_exec"
@@ -1337,7 +1341,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.19 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.20 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
