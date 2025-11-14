@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.18
+# SNAPSTREAM MANAGER v1.0.19
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -583,12 +583,18 @@ elif [ -f "${LOG}" ]; then
     # =============================
     if [ -z "$REASON" ]; then
         PID=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null || echo 0)
-        if [ "$PID" -gt 0 ] 2>/dev/null; then
+
+        # Validate PID is numeric and > 1 (PID 1 = systemd)
+        if [[ "$PID" =~ ^[0-9]+$ ]] && [ "$PID" -gt 1 ]; then
             W1=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo 0)
             sleep 0.5
             W2=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo 0)
-            if [ "$W1" -eq "$W2" ]; then
-                REASON="ffmpeg appears frozen (no write_bytes delta)"
+            
+            # numeric comparison safeguard
+            if [[ "$W1" =~ ^[0-9]+$ ]] && [[ "$W2" =~ ^[0-9]+$ ]]; then
+                if [ "$W1" -eq "$W2" ]; then
+                    REASON="ffmpeg appears frozen (no write_bytes delta)"
+                fi
             fi
         fi
     fi
@@ -1331,7 +1337,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.18 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.19 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
