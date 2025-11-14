@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.13
+# SNAPSTREAM MANAGER v1.0.14
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -551,12 +551,13 @@ if ! systemctl is-active --quiet "${UNIT}"; then
 elif [ ! -p "${FIFO}" ]; then
   REASON="FIFO pipe was missing"
 elif [ -f "${LOG}" ]; then
-  if grep -E -q -- "${PATTERN}" <<<"" 2>/dev/null; then
+  printf '' | grep -E -q -- "${PATTERN}" 2>/dev/null; rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "[WATCHDOG] WARNING: invalid ERROR_PATTERN_REGEX='${PATTERN}', skipping regex check." >> "${LOG}"
+  else
     if tail -n 200 "${LOG}" 2>/dev/null | grep -E -q -- "${PATTERN}"; then
       REASON="detected critical error pattern in logs"
     fi
-  else
-    echo "[WATCHDOG] WARNING: invalid ERROR_PATTERN_REGEX='${PATTERN}', skipping regex check." >> "${LOG}"
   fi
   if [ -z "${REASON}" ]; then
     if [ -s "${LOG}" ] && [ "${LOG_STALE_SECONDS}" -gt 0 ] 2>/dev/null; then
@@ -1274,7 +1275,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.13 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.14 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
