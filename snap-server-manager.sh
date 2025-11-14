@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.16
+# SNAPSTREAM MANAGER v1.0.18
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -532,61 +532,107 @@ ensure_watchdog_templates(){
     cat > "$w_exec" <<'EOF'
 #!/bin/bash
 set -e
+
 INSTANCE="$1"
 UNIT="ffmpeg-${INSTANCE}.service"
 LOG="/var/log/ffmpeg/ffmpeg-${INSTANCE}.log"
 FIFO="/var/lib/snapserver/fifo/snapfifo_${INSTANCE}"
+
 REASON=""
+
+# --- Load defaults or EnvironmentFile overrides ---
 LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-90}"
 MIN_UPTIME_SECONDS="${MIN_UPTIME_SECONDS:-120}"
 ERROR_PATTERN_REGEX="${ERROR_PATTERN_REGEX:-"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"}"
 
-# sanitize pattern from EnvironmentFile (strip optional surrounding quotes)
+# --- Sanitize regex (remove accidental quotes) ---
 PATTERN="${ERROR_PATTERN_REGEX}"
-PATTERN=${PATTERN#\"}
-PATTERN=${PATTERN%\"}
+PATTERN="${PATTERN#\"}"
+PATTERN="${PATTERN%\"}"
 
+# =============================
+# 1) BASIC HEALTH CHECKS
+# =============================
 if ! systemctl is-active --quiet "${UNIT}"; then
-  REASON="service was not active"
+    REASON="service was not active"
+
 elif [ ! -p "${FIFO}" ]; then
-  REASON="FIFO pipe was missing"
+    REASON="FIFO pipe was missing"
+
 elif [ -f "${LOG}" ]; then
-  if printf '' | grep -E -q -- "${PATTERN}" 2>/dev/null; then
-    rc=0
-  else
-    rc=$?
-  fi
-  if [ "$rc" -eq 2 ]; then
-    echo "[WATCHDOG] WARNING: invalid ERROR_PATTERN_REGEX='${PATTERN}', skipping regex check." >> "${LOG}"
-    PATTERN=""
-  fi
-  if [ -n "${PATTERN}" ]; then
-    if tail -n 200 "${LOG}" 2>/dev/null | grep -E -q -- "${PATTERN}"; then
-      REASON="detected critical error pattern in logs"
+
+    # =============================
+    # 2) CRITICAL ERROR PATTERN CHECK
+    # =============================
+    if [ -n "${PATTERN}" ]; then
+        if ! printf '' | grep -E -q "${PATTERN}" 2>/dev/null; then
+            # Pattern is invalid → disable pattern matching
+            PATTERN=""
+            echo "[WATCHDOG] Invalid ERROR_PATTERN_REGEX, skipping regex check." >> "${LOG}"
+        fi
     fi
-  fi
-  if [ -z "${REASON}" ]; then
-    if [ -s "${LOG}" ] && [ "${LOG_STALE_SECONDS}" -gt 0 ] 2>/dev/null; then
-      LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
-      if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then
-         ACTIVE_SINCE_BOOT=$(systemctl show "${UNIT}" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
-         UPTIME=$(awk '{print int($1)}' /proc/uptime)
-         if [[ "${ACTIVE_SINCE_BOOT}" -gt 0 ]] && [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then
-            REASON="process appears frozen (log not updated in ${LAST_UPDATE}s, non-empty log)"
-         fi
-      fi
+
+    if [ -n "${PATTERN}" ]; then
+        if tail -n 200 "${LOG}" 2>/dev/null | grep -E -q "${PATTERN}"; then
+            REASON="detected critical error pattern in logs"
+        fi
     fi
-  fi
+
+    # =============================
+    # 3) FFmpeg write_bytes delta check (non-invasive)
+    # =============================
+    if [ -z "$REASON" ]; then
+        PID=$(systemctl show "$UNIT" -p MainPID --value 2>/dev/null || echo 0)
+        if [ "$PID" -gt 0 ] 2>/dev/null; then
+            W1=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo 0)
+            sleep 0.5
+            W2=$(awk '/write_bytes/ {print $2}' "/proc/$PID/io" 2>/dev/null || echo 0)
+            if [ "$W1" -eq "$W2" ]; then
+                REASON="ffmpeg appears frozen (no write_bytes delta)"
+            fi
+        fi
+    fi
+
+    # =============================
+    # 4) LOG STALE CHECK
+    # =============================
+    if [ -z "${REASON}" ] && [ "${LOG_STALE_SECONDS}" -gt 0 ] 2>/dev/null; then
+
+        LAST_UPDATE=$(( $(date +%s) - $(stat -c %Y "${LOG}" 2>/dev/null || echo $(date +%s)) ))
+
+        if [[ "${LAST_UPDATE}" -gt "${LOG_STALE_SECONDS}" ]]; then
+            ACTIVE_SINCE_BOOT=$(systemctl show "${UNIT}" -p ActiveEnterTimestampMonotonic --value 2>/dev/null || echo 0)
+            UPTIME=$(awk '{print int($1)}' /proc/uptime)
+
+            # Must have been running long enough to be considered "stuck"
+            if [[ "${ACTIVE_SINCE_BOOT}" -gt 0 ]] && \
+               [[ $(( UPTIME - (ACTIVE_SINCE_BOOT / 1000000) )) -gt "${MIN_UPTIME_SECONDS}" ]]; then
+                REASON="process appears frozen (log not updated for ${LAST_UPDATE}s)"
+            fi
+        fi
+    fi
 fi
 
+# =============================
+# 5) EXECUTE RECOVERY IF NEEDED
+# =============================
 if [ -n "${REASON}" ]; then
-  if [ -f "${LOG}" ]; then mv "${LOG}" "${LOG}.prev.$(date +%s)" 2>/dev/null || true; fi
-  systemctl restart "${UNIT}"
-  sleep 1
-  : > "${LOG}"
-  chown snapserver:snapserver "${LOG}" 2>/dev/null || true
-  echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}." >> "${LOG}"
+    # Archive previous log
+    if [ -f "${LOG}" ]; then
+        mv "${LOG}" "${LOG}.prev.$(date +%s)" 2>/dev/null || true
+    fi
+
+    # Restart ffmpeg service
+    systemctl restart "${UNIT}"
+
+    # Reset log file
+    sleep 1
+    : > "${LOG}"
+    chown snapserver:snapserver "${LOG}" 2>/dev/null || true
+
+    echo "[WATCHDOG] Restarting ${UNIT}. Reason: ${REASON}." >> "${LOG}"
 fi
+
 EOF
     chmod 0755 "$w_exec"
   fi
@@ -1285,7 +1331,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.16 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.18 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
