@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.15
+# SNAPSTREAM MANAGER v1.0.16
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -551,7 +551,11 @@ if ! systemctl is-active --quiet "${UNIT}"; then
 elif [ ! -p "${FIFO}" ]; then
   REASON="FIFO pipe was missing"
 elif [ -f "${LOG}" ]; then
-  printf '' | grep -E -q -- "${PATTERN}" 2>/dev/null; rc=$?
+  if printf '' | grep -E -q -- "${PATTERN}" 2>/dev/null; then
+    rc=0
+  else
+    rc=$?
+  fi
   if [ "$rc" -eq 2 ]; then
     echo "[WATCHDOG] WARNING: invalid ERROR_PATTERN_REGEX='${PATTERN}', skipping regex check." >> "${LOG}"
     PATTERN=""
@@ -1281,7 +1285,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.15 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.16 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
