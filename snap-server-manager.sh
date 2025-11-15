@@ -637,21 +637,22 @@ StartLimitBurst=10
 
 [Service]
 # ================================================================
-# 1. Esperar hasta que el FIFO exista (Snapserver tarda en iniciarlo)
+# 1. Esperar hasta que el FIFO exista
 # ================================================================
-ExecStartPre=/bin/bash -c "for i in {1..10}; do [ -p '${fifo_path}' ] && exit 0 || sleep 1; done; exit 1"
+ExecStartPre=/bin/bash -c 'for i in {1..10}; do [ -p "${fifo_path}" ] && exit 0 || sleep 1; done; exit 1'
 
 # ================================================================
-# 2. Crear FIFO si no existe (permisos correctos)
+# 2. Crear FIFO si no existe
 # ================================================================
-ExecStartPre=/bin/bash -c "
-  if [ ! -p '${fifo_path}' ]; then
-    echo '[FFMPEG] FIFO missing, creating: ${fifo_path}';
-    mkfifo '${fifo_path}';
-    chown ${SNAP_USER}:${SNAP_GROUP} '${fifo_path}';
-    chmod 666 '${fifo_path}';
-  fi
-"
+ExecStartPre=/bin/bash -c '
+if [ ! -p "${fifo_path}" ]; then
+  echo "[FFMPEG] FIFO missing, creating: ${fifo_path}";
+  rm -f "${fifo_path}";
+  mkfifo "${fifo_path}";
+  chown ${SNAP_USER}:${SNAP_GROUP} "${fifo_path}";
+  chmod 666 "${fifo_path}";
+fi
+'
 
 # ================================================================
 # 3. Ejecutar FFmpeg
@@ -661,13 +662,13 @@ ExecStart=${ffmpeg_line}
 # ================================================================
 # 4. Regenerar FIFO al detener FFmpeg
 # ================================================================
-ExecStopPost=/bin/bash -c "
-  echo '[FFMPEG] Regenerating FIFO after stop: ${fifo_path}';
-  rm -f '${fifo_path}';
-  mkfifo '${fifo_path}';
-  chown ${SNAP_USER}:${SNAP_GROUP} '${fifo_path}';
-  chmod 666 '${fifo_path}';
-"
+ExecStopPost=/bin/bash -c '
+echo "[FFMPEG] Regenerating FIFO after stop: ${fifo_path}";
+rm -f "${fifo_path}";
+mkfifo "${fifo_path}";
+chown ${SNAP_USER}:${SNAP_GROUP} "${fifo_path}";
+chmod 666 "${fifo_path}";
+'
 
 User=${SNAP_USER}
 Restart=always
@@ -681,7 +682,6 @@ StandardError=append:$(log_file_for "$stream_id")
 WantedBy=multi-user.target
 EOF
 }
-
 
 ensure_watchdog_templates(){
   local w_service="${SYSTEMD_DIR}/ffmpeg-watchdog@.service"
