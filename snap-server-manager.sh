@@ -925,7 +925,7 @@ ffmpeg_cmd_for(){
     -rw_timeout 15000000 \
     ${INPUT_ARGS} \
     -acodec pcm_s16le -ac 2 -ar 48000 \
-    -f s16le -flush_packets 1 -y \"${FIFO_PATH}\""
+    -f s16le -flush_packets 1 -y ${FIFO_PATH}"
 }
 
 
@@ -1099,12 +1099,12 @@ create_stream(){
       read -rp "URL: " URL < /dev/tty
       [ -z "$URL" ] && { echo "❌ No URL provided."; pause; return; }
       # Solo el input, los reconnect los añade ffmpeg_cmd_for()
-      INPUT_ARGS="-i \"$URL\""
+      INPUT_ARGS="-i ${URL}"
       ;;
     2)
       read -rp "Path to file (mp3/wav/flac): " FILE < /dev/tty
       [ -f "$FILE" ] || { echo "❌ File not found."; pause; return; }
-      INPUT_ARGS="-stream_loop -1 -re -i \"$FILE\""
+      INPUT_ARGS="-stream_loop -1 -re -i ${FILE}"
       ;;
     3)
       echo "Example: -f alsa -i hw:0"
