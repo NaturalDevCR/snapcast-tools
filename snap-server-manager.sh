@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.21
+# SNAPSTREAM MANAGER v1.0.22
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -150,6 +150,37 @@ fix_snapserver_unit(){
     cp -f /etc/snapserver.conf /var/lib/snapserver/config/snapserver.conf 2>/dev/null || true
     chown "$SNAP_USER:$SNAP_GROUP" /var/lib/snapserver/config/snapserver.conf
   fi
+}
+
+pretty_name_from_id(){
+  local id="$1"
+
+  # 1. Convertir separadores (- y _) a espacio
+  id="${id//_/ }"
+  id="${id//-/ }"
+
+  # 2. Insertar espacios entre cambios de mayúscula/minúscula
+  id=$(echo "$id" | sed -E 's/([a-z])([A-Z])/\1 \2/g')
+
+  # 3. Dividir palabras en secuencias lógicas
+  local out=""
+  for w in $id; do
+    # Casos especiales (siglas)
+    case "$w" in
+      pc) w="PC" ;;
+      swyh) w="SWYH" ;;
+      ffmpeg) w="FFmpeg" ;;
+    esac
+
+    # Si después de eso todavía es minúscula → capitalizar
+    if [[ "$w" =~ ^[a-z] ]]; then
+      w="$(tr '[:lower:]' '[:upper:]' <<< "${w:0:1}")${w:1}"
+    fi
+
+    out+="$w "
+  done
+
+  echo "${out%" "}"
 }
 
 monitor_snapserver(){
@@ -467,6 +498,73 @@ get_stream_lines(){
   ' "$CONF_FILE"
 }
 
+rebuild_all_units(){
+  echo ""
+  echo "🔧 Rebuilding ALL FFmpeg units using the latest template…"
+  echo ""
+
+  for svc in /etc/systemd/system/ffmpeg-*.service; do
+    [ -e "$svc" ] || continue
+
+    local service_name stream_id fifo stream_name
+    service_name=$(basename "$svc")
+    stream_id=$(echo "$service_name" | sed -E 's/^ffmpeg-(.+)\.service$/\1/')
+    fifo=$(fifo_path_for "$stream_id")
+    stream_name=$(pretty_name_from_id "$stream_id")
+
+    echo "• Migrating: ${service_name}  (ID=${stream_id}, FIFO=${fifo})"
+
+    # Extraer la línea antigua sin romper comillas
+    local old_line
+    old_line=$(grep -E '^[[:space:]]*ExecStart=' "$svc" | sed 's/ExecStart=//')
+
+    if [ -z "$old_line" ]; then
+      echo "  ⚠️  Cannot extract ExecStart from $service_name — skipped."
+      continue
+    fi
+
+    # Tratar de extraer solo los INPUT_ARGS del FFmpeg
+    # Eliminamos todo lo que esté después del primer -acodec o -f s16le
+    local input_args
+    input_args=$(echo "$old_line" \
+      | sed -E 's/^.*ffmpeg[[:space:]]+//' \
+      | sed -E 's/ -acodec.*$//' \
+      | sed -E 's/ -f s16le.*$//'
+    )
+
+    if [ -z "$input_args" ]; then
+       echo "  ⚠️  Could not reconstruct INPUT_ARGS — skipping."
+       continue
+    fi
+
+    # Construye FFmpeg desde tu nueva función
+    local new_ffmpeg_line
+    new_ffmpeg_line=$(ffmpeg_cmd_for "$input_args" "$fifo")
+
+    # Reescribe el unit con tu plantilla unificada
+    write_unit "$service_name" "$new_ffmpeg_line" "$stream_name" "$stream_id" "$fifo"
+
+    echo "  ✅ Rebuilt."
+  done
+
+  echo ""
+  echo "🔁 Reloading Systemd and restarting all ffmpeg services…"
+  systemctl daemon-reload
+
+  for svc in /etc/systemd/system/ffmpeg-*.service; do
+    [ -e "$svc" ] || continue
+    systemctl restart "$(basename "$svc")" 2>/dev/null || true
+  done
+
+  echo "🔁 Restarting Snapserver…"
+  systemctl restart snapserver
+
+  echo ""
+  echo "🎉 All units successfully migrated to the new standard."
+  pause
+}
+
+
 show_streams_numbered(){
   echo ""
   echo "📜 Configured Streams:"
@@ -492,32 +590,92 @@ log_file_for(){ echo "${LOG_DIR}/ffmpeg-$1.log"; }
 
 ensure_fifo(){
   local fp="$1"
-  [ -p "$fp" ] || mkfifo "$fp"
+
+  # Si existe pero NO ES un FIFO → eliminar (alguien creó un archivo en su lugar)
+  if [ -e "$fp" ] && [ ! -p "$fp" ]; then
+    rm -f "$fp"
+  fi
+
+  # Si el FIFO no existe → crearlo limpio
+  if [ ! -p "$fp" ]; then
+    mkfifo "$fp"
+    chown "$SNAP_USER:$SNAP_GROUP" "$fp"
+    chmod 666 "$fp"
+    return
+  fi
+
+  # Si existe, verificar si está siendo usado por FFmpeg
+  local pid
+  pid=$(fuser "$fp" 2>/dev/null | tr -d ' ' || true)
+
+  # Si no hay writers activos → regenerarlo (sanitizar pipes corruptos)
+  if [ -z "$pid" ]; then
+    rm -f "$fp"
+    mkfifo "$fp"
+  fi
+
+  # Siempre corregir propiedad y permisos
   chown "$SNAP_USER:$SNAP_GROUP" "$fp"
   chmod 666 "$fp"
 }
 
 write_unit(){
-  local service_name="$1" ffmpeg_line="$2" stream_name="$3" stream_id="$4" fifo_path="$5"
-  local logfile="/var/log/ffmpeg/ffmpeg-${stream_id}.log"
+  local service_name="$1"
+  local ffmpeg_line="$2"
+  local stream_name="$3"
+  local stream_id="$4"
+  local fifo_path="$5"
 
   cat > "${SYSTEMD_DIR}/${service_name}" <<EOF
 [Unit]
 Description=FFmpeg Stream for ${stream_name}
 After=network-online.target snapserver.service
-PartOf=snapserver.service
 Requires=snapserver.service
+PartOf=snapserver.service
+StartLimitIntervalSec=30
+StartLimitBurst=10
 
 [Service]
+# ================================================================
+# 1. Esperar hasta que el FIFO exista (Snapserver tarda en iniciarlo)
+# ================================================================
+ExecStartPre=/bin/bash -c "for i in {1..10}; do [ -p '${fifo_path}' ] && exit 0 || sleep 1; done; exit 1"
+
+# ================================================================
+# 2. Crear FIFO si no existe (permisos correctos)
+# ================================================================
+ExecStartPre=/bin/bash -c "
+  if [ ! -p '${fifo_path}' ]; then
+    echo '[FFMPEG] FIFO missing, creating: ${fifo_path}';
+    mkfifo '${fifo_path}';
+    chown ${SNAP_USER}:${SNAP_GROUP} '${fifo_path}';
+    chmod 666 '${fifo_path}';
+  fi
+"
+
+# ================================================================
+# 3. Ejecutar FFmpeg
+# ================================================================
 ExecStart=${ffmpeg_line}
-ExecStopPost=/bin/bash -c 'rm -f "${fifo_path}" && mkfifo "${fifo_path}" && chown ${SNAP_USER}:${SNAP_GROUP} "${fifo_path}" && chmod 666 "${fifo_path}"'
+
+# ================================================================
+# 4. Regenerar FIFO al detener FFmpeg
+# ================================================================
+ExecStopPost=/bin/bash -c "
+  echo '[FFMPEG] Regenerating FIFO after stop: ${fifo_path}';
+  rm -f '${fifo_path}';
+  mkfifo '${fifo_path}';
+  chown ${SNAP_USER}:${SNAP_GROUP} '${fifo_path}';
+  chmod 666 '${fifo_path}';
+"
+
 User=${SNAP_USER}
 Restart=always
 RestartSec=5
-StartLimitIntervalSec=30
-StartLimitBurst=10
-StandardOutput=append:${logfile}
-StandardError=append:${logfile}
+LimitNOFILE=65536
+
+StandardOutput=append:$(log_file_for "$stream_id")
+StandardError=append:$(log_file_for "$stream_id")
 
 [Install]
 WantedBy=multi-user.target
@@ -530,8 +688,11 @@ ensure_watchdog_templates(){
   local w_exec="/usr/local/bin/snap_ffmpeg_watchdog.sh"
   local watchdog_conf="/etc/snapserver.d/snapstream-watchdog.conf"
 
+  # Asegurar directorio de logs global
+  mkdir -p /var/log/ffmpeg
+
   # ================================================================
-  # Always refresh watchdog executor script (avoid stale versions)
+  # Siempre refrescar el script del watchdog (evitar versiones viejas)
   # ================================================================
   echo "⚙️ Updating watchdog executor script..."
   cat > "$w_exec" <<'EOF'
@@ -542,8 +703,16 @@ INSTANCE="$1"
 UNIT="ffmpeg-${INSTANCE}.service"
 LOG="/var/log/ffmpeg/ffmpeg-${INSTANCE}.log"
 FIFO="/var/lib/snapserver/fifo/snapfifo_${INSTANCE}"
+WLOG="/var/log/ffmpeg/watchdog-${INSTANCE}.log"
 
 REASON=""
+
+# Asegurar directorios de logs
+LOG_DIR="$(dirname "$LOG")"
+mkdir -p "$LOG_DIR"
+mkdir -p "$(dirname "$WLOG")"
+touch "$WLOG"
+chown snapserver:snapserver "$WLOG" 2>/dev/null || true
 
 # --- Load defaults or EnvironmentFile overrides ---
 LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-90}"
@@ -556,10 +725,21 @@ PATTERN="${PATTERN#\"}"
 PATTERN="${PATTERN%\"}"
 
 # ================================================================
-# 1) BASIC HEALTH CHECKS
+# Pre-lectura de estado de systemd (para CrashLoop detection)
 # ================================================================
-if ! systemctl is-active --quiet "${UNIT}"; then
-    REASON="service was not active"
+UNIT_STATE="$(systemctl show "$UNIT" -p ActiveState --value 2>/dev/null || echo "unknown")"
+NRESTARTS="$(systemctl show "$UNIT" -p NRestarts --value 2>/dev/null || echo 0)"
+
+# ================================================================
+# 1) BASIC HEALTH CHECKS + CrashLoop básico
+# ================================================================
+if [ "$UNIT_STATE" != "active" ]; then
+    # Servicio no está activo ahora; revisar si viene de un storm de reinicios
+    if [[ "$NRESTARTS" =~ ^[0-9]+$ ]] && [ "$NRESTARTS" -gt 5 ]; then
+        REASON="service not active (CrashLoop detected, NRestarts=${NRESTARTS})"
+    else
+        REASON="service was not active"
+    fi
 
 elif [ -z "$FIFO" ] || [ ! -p "$FIFO" ]; then
     REASON="FIFO pipe was missing"
@@ -633,6 +813,8 @@ if [ -n "$REASON" ]; then
         mv "$LOG" "$LOG.prev.$(date +%s)" 2>/dev/null || true
     fi
 
+    echo "[$(date -Iseconds)] ACTION: $UNIT — $REASON (systemctl restart)" >> "$WLOG"
+
     # Restart FFmpeg service
     systemctl restart "$UNIT"
 
@@ -641,7 +823,23 @@ if [ -n "$REASON" ]; then
     : > "$LOG"
     chown snapserver:snapserver "$LOG" 2>/dev/null || true
 
+    # Asegurar que el FIFO exista después del restart (por si ExecStopPost no corrió)
+    if [ -n "$FIFO" ]; then
+        if [ ! -p "$FIFO" ]; then
+            rm -f "$FIFO" 2>/dev/null || true
+            mkdir -p "$(dirname "$FIFO")"
+            mkfifo "$FIFO"
+            chown snapserver:snapserver "$FIFO" 2>/dev/null || true
+            chmod 666 "$FIFO" 2>/dev/null || true
+            echo "[WATCHDOG] FIFO recreated at $FIFO" >> "$LOG"
+        fi
+    fi
+
     echo "[WATCHDOG] Restarted $UNIT — Reason: $REASON" >> "$LOG"
+
+else
+    # Estado saludable, loguear OK del watchdog
+    echo "[$(date -Iseconds)] OK: $UNIT healthy (state=${UNIT_STATE}, NRestarts=${NRESTARTS})" >> "$WLOG"
 fi
 
 EOF
@@ -696,6 +894,7 @@ EOF
   fi
 }
 
+
 ensure_logrotate(){
   local LOGROTATE_CONF="/etc/logrotate.d/ffmpeg-snapstream"
   if [ ! -f "$LOGROTATE_CONF" ]; then
@@ -716,9 +915,18 @@ EOF
 }
 
 ffmpeg_cmd_for(){
-  local INPUT_ARGS="$1" FIFO_PATH="$2"
-  echo "/usr/bin/ffmpeg -hide_banner -nostats -loglevel error $INPUT_ARGS -acodec pcm_s16le -ac 2 -ar 48000 -f s16le -y \"$FIFO_PATH\""
+  local INPUT_ARGS="$1"
+  local FIFO_PATH="$2"
+
+  echo "/usr/bin/ffmpeg \
+    -hide_banner -nostats -loglevel error -nostdin \
+    -reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 \
+    -rw_timeout 15000000 \
+    ${INPUT_ARGS} \
+    -acodec pcm_s16le -ac 2 -ar 48000 \
+    -f s16le -flush_packets 1 -y \"${FIFO_PATH}\""
 }
+
 
 ##
 # add_or_replace_stream_line
@@ -737,37 +945,23 @@ add_or_replace_stream_line(){
 
   awk -v fifo_path="${fifo}" \
       -v new_line="${new_line}" '
-      BEGIN {
-          in_stream_section = 0;
-          inserted = 0;
-      }
-      /^\[stream\]/ {
-          print;
-          in_stream_section = 1;
-          next;
-      }
+      BEGIN { in_stream=0; found=0 }
+      /^\[stream\]/ { print; in_stream=1; next }
       /^\[/ {
-          if (in_stream_section && !inserted) {
-              print new_line;
-              inserted = 1;
-          }
-          in_stream_section = 0;
+          if (in_stream && !found) print new_line
+          in_stream=0
       }
-      in_stream_section && $0 ~ fifo_path {
-          next;
-      }
-      { print; }
+      in_stream && index($0,fifo_path)>0 { found=1; next }
+      { print }
       END {
-          if (in_stream_section && !inserted) {
-              print new_line;
-          }
+          if (in_stream && !found) print new_line
       }
   ' "$CONF_FILE" > "$tmp_conf"
 
   mv "$tmp_conf" "$CONF_FILE"
-  rm -f "$tmp_conf"
   chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
 }
+
 
 # Add or replace a metastream line referencing a source and the global Silence
 ##
@@ -780,39 +974,32 @@ add_or_replace_stream_line(){
 # Silence as the fallback, providing correct behavior when the source is down.
 ##
 add_or_replace_metastream_line(){
-  local source_name="$1" meta_name="$2" sample="48000:16:2"
+  local source_name="$1"
+  local meta_name="$2"
+  local sample="48000:16:2"
   local tmp_conf; tmp_conf="$(mktemp)"
 
   local new_line="source = meta:///${source_name}/Silence?name=${meta_name}&codec=pcm&sampleformat=${sample}"
 
-  awk -v src_name="${source_name}" \
+  awk -v src="${source_name}" \
       -v new_line="${new_line}" '
-      BEGIN { in_stream_section = 0; inserted = 0; replaced = 0; }
-      /^\[stream\]/ { print; in_stream_section = 1; next; }
+      BEGIN { in_stream=0; found=0 }
+      /^\[stream\]/ { print; in_stream=1; next }
       /^\[/ {
-          if (in_stream_section && !inserted && !replaced) {
-              print new_line;
-              inserted = 1;
-          }
-          in_stream_section = 0;
+          if (in_stream && !found) print new_line
+          in_stream=0
       }
-      in_stream_section {
-          if (!replaced && index($0, "source = meta:///" src_name "/Silence") > 0) {
-              print new_line; replaced = 1; next;
-          }
-      }
-      { print; }
+      in_stream && index($0, "meta:///" src "/Silence")>0 { found=1; next }
+      { print }
       END {
-          if (in_stream_section && !inserted && !replaced) {
-              print new_line;
-          }
+          if (in_stream && !found) print new_line
       }
   ' "$CONF_FILE" > "$tmp_conf"
 
   mv "$tmp_conf" "$CONF_FILE"
-  rm -f "$tmp_conf"
   chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
 }
+
 
 # Ensure default pipe sources with codec=null for known FIFOs and names
 ##
@@ -824,19 +1011,26 @@ add_or_replace_metastream_line(){
 ##
 ensure_default_pipe_sources(){
   echo "🧩 Ensuring default pipe sources (codec=null)…"
-  add_or_replace_stream_line \
-    "/var/lib/snapserver/fifo/snapfifo_frontdesk" "PC-FrontDesk"
-  add_or_replace_stream_line \
-    "/var/lib/snapserver/fifo/snapfifo_aracari" "PC-Aracari"
-  add_or_replace_stream_line \
-    "/var/lib/snapserver/fifo/snapfifo_azuracastrestaurants" "Azuracast-Restaurants"
-  add_or_replace_stream_line \
-    "/var/lib/snapserver/fifo/snapfifo_azuracastfrontdesk" "Azuracast-FrontDesk"
-  add_or_replace_stream_line \
-    "/var/lib/snapserver/fifo/snapfifo_azuracastoutdoors" "Azuracast-Outdoors"
-  add_or_replace_stream_line \
-    "/var/lib/snapserver/fifo/snapfifo_pcpool" "PC-Pool"
+
+  local svc stream_id fifo stream_name
+
+  # Recorre todos los ffmpeg-*.service existentes
+  for svc in /etc/systemd/system/ffmpeg-*.service; do
+    [ -e "$svc" ] || continue
+
+    stream_id=$(basename "$svc" | sed -E 's/^ffmpeg-(.+)\.service$/\1/')
+    [ -z "$stream_id" ] && continue
+
+    fifo="$(fifo_path_for "$stream_id")"
+    stream_name="$(pretty_name_from_id "$stream_id")"
+
+    add_or_replace_stream_line "$fifo" "$stream_name"
+  done
+
+  echo "✅ Default pipe sources updated based on existing FFmpeg services."
 }
+
+
 
 # Ensure default metastreams referencing Silence fallback
 ##
@@ -848,21 +1042,38 @@ ensure_default_pipe_sources(){
 # Why: Presents meaningful names to users and guarantees Silence fallback.
 #
 ensure_default_metastreams(){
-  # Guard: require global Silence to exist in [stream] before creating MetaStreams
+  echo "🧩 Ensuring default MetaStreams (pretty names + Silence fallback)…"
+
+  # Confirmar que Silence existe primero
   if ! grep -qE '^\s*source\s*=\s*process:///usr/bin/ffmpeg.*name=Silence' "$CONF_FILE"; then
-    echo "⚠️  Global 'Silence' source not found in [stream]."
-    echo "    Run 'Configuration → Ensure global Silence source' first."
+    echo "⚠️  Global 'Silence' source missing in config."
+    echo "    Run 'Ensure global Silence stream' first."
     pause
     return
   fi
-  echo "🧩 Ensuring default metastreams (codec=pcm, Silence fallback)…"
-  add_or_replace_metastream_line "PC-FrontDesk" "FrontDesk"
-  add_or_replace_metastream_line "PC-Aracari" "Aracari"
-  add_or_replace_metastream_line "Azuracast-Restaurants" "Restaurants"
-  add_or_replace_metastream_line "Azuracast-FrontDesk" "AzuraFrontDesk"
-  add_or_replace_metastream_line "Azuracast-Outdoors" "Outdoors"
-  add_or_replace_metastream_line "PC-Pool" "Pool"
+
+  local svc stream_id source_name meta_name
+
+  # Recorrer todos los services ffmpeg-*.service existentes
+  for svc in /etc/systemd/system/ffmpeg-*.service; do
+    [ -e "$svc" ] || continue
+
+    # Obtener ID del archivo
+    stream_id=$(basename "$svc" | sed -E 's/^ffmpeg-(.+)\.service$/\1/')
+    [ -z "$stream_id" ] && continue
+
+    # Generar nombres bonitos
+    source_name=$(pretty_name_from_id "$stream_id")
+    meta_name="$source_name"
+
+    # Agregar MetaStream
+    add_or_replace_metastream_line "$source_name" "$meta_name"
+  done
+
+  echo "✅ Default MetaStreams refreshed."
 }
+
+
 
 create_stream(){
   echo ""
@@ -871,7 +1082,8 @@ create_stream(){
   echo "2) Local file (infinite loop)"
   echo "3) Custom FFmpeg (input arguments only)"
 
-  local kind STREAM_NAME STREAM_ID FIFO_PATH SERVICE_NAME INPUT_ARGS URL FILE CUSTOM FFMPEG_LINE
+  local kind STREAM_NAME STREAM_ID FIFO_PATH SERVICE_NAME INPUT_ARGS URL FILE CUSTOM FFMPEG_LINE META_NAME
+
   read -rp "Choose type [1-3]: " kind < /dev/tty
   read -rp "Stream name: " STREAM_NAME < /dev/tty
   [ -z "$STREAM_NAME" ] && { echo "❌ Name is required."; pause; return; }
@@ -879,12 +1091,14 @@ create_stream(){
   STREAM_ID="$(mk_stream_id "$STREAM_NAME")"
   FIFO_PATH="$(fifo_path_for "$STREAM_ID")"
   SERVICE_NAME="$(service_name_for "$STREAM_ID")"
+  META_NAME="$STREAM_NAME"
 
   case "$kind" in
     1)
       read -rp "URL: " URL < /dev/tty
       [ -z "$URL" ] && { echo "❌ No URL provided."; pause; return; }
-      INPUT_ARGS="-reconnect 1 -reconnect_streamed 1 -reconnect_delay_max 5 -i \"$URL\""
+      # Solo el input, los reconnect los añade ffmpeg_cmd_for()
+      INPUT_ARGS="-i \"$URL\""
       ;;
     2)
       read -rp "Path to file (mp3/wav/flac): " FILE < /dev/tty
@@ -893,7 +1107,7 @@ create_stream(){
       ;;
     3)
       echo "Example: -f alsa -i hw:0"
-      echo "⚠️  WARNING: The arguments will be used directly in the service. Use with caution."
+      echo "⚠️  WARNING: These arguments will be inserted directly in the unit."
       read -rp "FFmpeg input arguments: " CUSTOM < /dev/tty
       [ -z "$CUSTOM" ] && { echo "❌ You must provide arguments."; pause; return; }
       INPUT_ARGS="$CUSTOM"
@@ -907,6 +1121,7 @@ create_stream(){
 
   ensure_fifo "$FIFO_PATH"
   FFMPEG_LINE="$(ffmpeg_cmd_for "$INPUT_ARGS" "$FIFO_PATH")"
+
   write_unit "$SERVICE_NAME" "$FFMPEG_LINE" "$STREAM_NAME" "$STREAM_ID" "$FIFO_PATH"
 
   systemctl daemon-reload
@@ -916,9 +1131,41 @@ create_stream(){
   echo "🛡️ Activating advanced watchdog for '$STREAM_NAME'..."
   systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" >/dev/null 2>&1 || true
 
+  # PIPE (codec=null)
   add_or_replace_stream_line "$FIFO_PATH" "$STREAM_NAME"
+
+  # METASTREAM
+  add_or_replace_metastream_line "$STREAM_NAME" "$META_NAME"
+
   systemctl restart snapserver
-  echo "✅ Stream '$STREAM_NAME' created and started with advanced watchdog."
+
+  echo "✅ Stream '$STREAM_NAME' created and fully initialized with codec=null pipe, MetaStream, and watchdog."
+  pause
+}
+
+sync_all_streams(){
+  echo ""
+  echo "🔄 Syncing Snapserver stream configuration…"
+
+  ensure_silence_fallback         # Crea/actualiza Silence (process:///ffmpeg)
+  ensure_default_pipe_sources     # Genera pipe sources con codec=null
+  ensure_default_metastreams      # Genera MetaStreams visibles con Silence fallback
+  
+  echo "🔁 Reloading Systemd…"
+  systemctl daemon-reload
+
+  echo "🔁 Restarting all FFmpeg services…"
+  for svc in /etc/systemd/system/ffmpeg-*.service; do
+    [ -e "$svc" ] || continue
+    local name
+    name=$(basename "$svc")
+    systemctl restart "$name" 2>/dev/null || true
+  done
+
+  echo "🔁 Restarting Snapserver…"
+  systemctl restart snapserver
+
+  echo "✅ All streams synchronized successfully."
   pause
 }
 
@@ -1102,7 +1349,8 @@ services_menu(){
     echo "3) Restart Snapserver (optional)"
     echo "4) Restart specific FFmpeg services (optional)"
     echo "5) Restart ALL FFmpeg services (optional)"
-    echo "6) Back"
+    echo "6) Rebuild all FFmpeg units"
+    echo "7) Back"
     read -rp "Choose [1-6]: " opt < /dev/tty
     case "$opt" in
       1) monitor_snapserver ;;
@@ -1110,7 +1358,8 @@ services_menu(){
       3) restart_snapserver_with_confirm ;;
       4) restart_selected_ffmpeg_services ;;
       5) restart_all_ffmpeg_services ;;
-      6) return ;;
+      6) rebuild_all_ffmpeg_units ;;
+      7) return ;;
       *) ;;
     esac
   done
@@ -1349,7 +1598,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.21 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.22 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
@@ -1566,7 +1815,8 @@ configuration_menu(){
     echo "2) Ensure global Silence source"
     echo "3) Ensure default pipe sources"
     echo "4) Ensure default MetaStreams (Silence fallback)"
-    echo "5) Back"
+    echo "5) Sync ALL streams (Silence + pipes + MetaStreams + reload)"
+    echo "6) Back"
     echo "═══════════════════════════════════════════════════"
     read -rp "Choose an option: " opt < /dev/tty
     case "$opt" in
@@ -1574,7 +1824,8 @@ configuration_menu(){
       2) ensure_silence_fallback ;;
       3) ensure_default_pipe_sources ;;
       4) ensure_default_metastreams ;;
-      5) return ;;
+      5) sync_all_streams ;;
+      6) return ;;
       *) ;;
     esac
   done
