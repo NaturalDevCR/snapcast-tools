@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.26
+# SNAPSTREAM MANAGER v1.0.27
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -1080,6 +1080,7 @@ create_stream(){
   FIFO_PATH="$(fifo_path_for "$STREAM_ID")"
   SERVICE_NAME="$(service_name_for "$STREAM_ID")"
   META_NAME="$STREAM_NAME"
+  RAW_NAME="$STREAM_ID"
 
   case "$kind" in
     1)
@@ -1122,10 +1123,10 @@ create_stream(){
   systemctl enable --now "ffmpeg-watchdog@${STREAM_ID}.timer" >/dev/null 2>&1 || true
 
   # PIPE (codec=null)
-  add_or_replace_stream_line "$FIFO_PATH" "$STREAM_NAME"
+  add_or_replace_stream_line "$FIFO_PATH" "$RAW_NAME"
 
   # METASTREAM
-  add_or_replace_metastream_line "$STREAM_NAME" "$META_NAME"
+  add_or_replace_metastream_line "$RAW_NAME" "$META_NAME"
 
   systemctl restart snapserver
 
@@ -1588,7 +1589,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.26 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.27 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
