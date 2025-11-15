@@ -1,13 +1,14 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.5 (Functions Restored)
+# setup-snapclient.sh - v3.7 (Functions Restored)
 # Restores accidentally deleted functions `fix_alsa_order` and
 # `generate_diagnostics` for full menu functionality.
 #
-# Author: Josue / GPT-5 — v3.5
+# Author: NaturalDevCR
 # ==============================================================================
 
 set -Eeuo pipefail
+exec </dev/tty
 
 # === HELPER FUNCTIONS =======================================================
 
@@ -475,9 +476,10 @@ verify_existing_snapclient() {
 
 # === MAIN MENU =============================================================
 main() {
+  while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🎧 SNAPCLIENT AUDIO MANAGER v2025.10.29-r1"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.7"
     echo "═══════════════════════════════════════════════════"
     echo "1️⃣  Check prerequisites & ALSA modules (Host)"
     echo "2️⃣  Fix host ALSA card order"
@@ -497,8 +499,9 @@ main() {
       5) verify_existing_snapclient ;;
       6) generate_diagnostics ;;
       7) echo "👋 Exiting…"; exit 0 ;;
-      *) echo "❌ Invalid option."; exit 1 ;;
+      *) echo "❌ Invalid option."; sleep 1 ;;
     esac
+  done
 }
 
 main "$@"
