@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.25
+# SNAPSTREAM MANAGER v1.0.26
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -642,17 +642,9 @@ StartLimitBurst=10
 ExecStartPre=/bin/bash -c 'for i in {1..10}; do [ -p "${fifo_path}" ] && exit 0 || sleep 1; done; exit 1'
 
 # ================================================================
-# 2. Crear FIFO si no existe
+# 2. Crear FIFO si no existe (limpio y con permisos correctos)
 # ================================================================
-ExecStartPre=/bin/bash -c '
-if [ ! -p "${fifo_path}" ]; then
-  echo "[FFMPEG] FIFO missing, creating: ${fifo_path}";
-  rm -f "${fifo_path}";
-  mkfifo "${fifo_path}";
-  chown ${SNAP_USER}:${SNAP_GROUP} "${fifo_path}";
-  chmod 666 "${fifo_path}";
-fi
-'
+ExecStartPre=/bin/bash -c 'if [ ! -p "${fifo_path}" ]; then echo "[FFMPEG] FIFO missing, creating: ${fifo_path}"; rm -f "${fifo_path}"; mkfifo "${fifo_path}"; chown ${SNAP_USER}:${SNAP_GROUP} "${fifo_path}"; chmod 666 "${fifo_path}"; fi'
 
 # ================================================================
 # 3. Ejecutar FFmpeg
@@ -662,13 +654,7 @@ ExecStart=${ffmpeg_line}
 # ================================================================
 # 4. Regenerar FIFO al detener FFmpeg
 # ================================================================
-ExecStopPost=/bin/bash -c '
-echo "[FFMPEG] Regenerating FIFO after stop: ${fifo_path}";
-rm -f "${fifo_path}";
-mkfifo "${fifo_path}";
-chown ${SNAP_USER}:${SNAP_GROUP} "${fifo_path}";
-chmod 666 "${fifo_path}";
-'
+ExecStopPost=/bin/bash -c 'echo "[FFMPEG] Regenerating FIFO after stop: ${fifo_path}"; rm -f "${fifo_path}"; mkfifo "${fifo_path}"; chown ${SNAP_USER}:${SNAP_GROUP} "${fifo_path}"; chmod 666 "${fifo_path}";'
 
 User=${SNAP_USER}
 Restart=always
@@ -682,6 +668,7 @@ StandardError=append:$(log_file_for "$stream_id")
 WantedBy=multi-user.target
 EOF
 }
+
 
 ensure_watchdog_templates(){
   local w_service="${SYSTEMD_DIR}/ffmpeg-watchdog@.service"
@@ -925,7 +912,7 @@ ffmpeg_cmd_for(){
     -rw_timeout 15000000 \
     ${INPUT_ARGS} \
     -acodec pcm_s16le -ac 2 -ar 48000 \
-    -f s16le -flush_packets 1 -y ${FIFO_PATH}"
+    -f s16le -flush_packets 1 -y \"${FIFO_PATH}\""
 }
 
 
@@ -1098,19 +1085,21 @@ create_stream(){
     1)
       read -rp "URL: " URL < /dev/tty
       [ -z "$URL" ] && { echo "❌ No URL provided."; pause; return; }
-      # Solo el input, los reconnect los añade ffmpeg_cmd_for()
-      INPUT_ARGS="-i ${URL}"
+      URL=$(printf "%s" "$URL" | tr -d '`')
+      INPUT_ARGS="-i \"${URL}\""
       ;;
     2)
       read -rp "Path to file (mp3/wav/flac): " FILE < /dev/tty
       [ -f "$FILE" ] || { echo "❌ File not found."; pause; return; }
-      INPUT_ARGS="-stream_loop -1 -re -i ${FILE}"
+      FILE=$(printf "%s" "$FILE" | tr -d '`')
+      INPUT_ARGS="-stream_loop -1 -re -i \"${FILE}\""
       ;;
     3)
       echo "Example: -f alsa -i hw:0"
       echo "⚠️  WARNING: These arguments will be inserted directly in the unit."
       read -rp "FFmpeg input arguments: " CUSTOM < /dev/tty
       [ -z "$CUSTOM" ] && { echo "❌ You must provide arguments."; pause; return; }
+      CUSTOM=$(printf "%s" "$CUSTOM" | tr -d '`')
       INPUT_ARGS="$CUSTOM"
       ;;
     *)
@@ -1599,7 +1588,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.25 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.26 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
