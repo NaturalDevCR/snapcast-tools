@@ -682,6 +682,7 @@ WantedBy=multi-user.target
 EOF
 }
 
+
 ensure_watchdog_templates(){
   local w_service="${SYSTEMD_DIR}/ffmpeg-watchdog@.service"
   local w_timer="${SYSTEMD_DIR}/ffmpeg-watchdog@.timer"
