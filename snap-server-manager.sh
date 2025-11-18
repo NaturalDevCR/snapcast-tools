@@ -637,6 +637,13 @@ StartLimitBurst=10
 
 [Service]
 # ================================================================
+# AJUSTE DE TIEMPO DE MUERTE (WATCHDOG AGRESIVO)
+# Si FFmpeg no cierra en 10s tras recibir la orden, Systemd lo mata (SIGKILL)
+# ================================================================
+TimeoutStopSec=10
+KillMode=mixed
+
+# ================================================================
 # 1. Esperar hasta que el FIFO exista
 # ================================================================
 ExecStartPre=/bin/bash -c 'for i in {1..10}; do [ -p "${fifo_path}" ] && exit 0 || sleep 1; done; exit 1'
@@ -703,8 +710,8 @@ touch "$WLOG"
 chown snapserver:snapserver "$WLOG" 2>/dev/null || true
 
 # --- Load defaults or EnvironmentFile overrides ---
-LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-90}"
-MIN_UPTIME_SECONDS="${MIN_UPTIME_SECONDS:-120}"
+LOG_STALE_SECONDS="${LOG_STALE_SECONDS:-0}"
+MIN_UPTIME_SECONDS="${MIN_UPTIME_SECONDS:-45}"
 ERROR_PATTERN_REGEX="${ERROR_PATTERN_REGEX:-"(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"}"
 
 # --- Sanitize regex (remove accidental surrounding quotes) ---
@@ -875,8 +882,8 @@ EOF
     mkdir -p "$(dirname "$watchdog_conf")"
     cat > "$watchdog_conf" <<'EOF'
 # Snapstream Watchdog configuration (defaults)
-LOG_STALE_SECONDS=90
-MIN_UPTIME_SECONDS=120
+LOG_STALE_SECONDS=0
+MIN_UPTIME_SECONDS=45
 ERROR_PATTERN_REGEX="(Connection timed out|Protocol not found|No route to host|End of file|Connection refused|HTTP error|Invalid data found when processing input)"
 EOF
   fi

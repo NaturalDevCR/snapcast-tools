@@ -1,7 +1,9 @@
 # snapcast-tools
+
 Scripts to manage and make things easier with snapcast
 
 ## snap-server-manager.sh:
+
 Run directly on Debian:
 
 ```
@@ -17,6 +19,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-to
 Note: Do not wrap the URL in backticks; use plain quotes or pipe to bash.
 
 ### Config generation changes
+
 - Adds a global `process:///usr/bin/ffmpeg` Silence source inside `[stream]` with `codec=null` to be invisible to users.
 - Creates individual pipe sources for known FIFOs with `codec=null` and `sampleformat=48000:16:2`.
 - Adds MetaStreams that reference the Silence fallback with `codec=pcm`, matching Snapserver best practices.
@@ -44,6 +47,7 @@ source = meta:///PC-Pool/Silence?name=Pool&codec=pcm&sampleformat=48000:16:2
 This ensures all user-facing streams have a stable Silence fallback using MetaStreams.
 
 ## snapclient-setup.sh:
+
 ```
-curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snapclient-setup.sh | bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snapclient-setup.sh)"
 ```
