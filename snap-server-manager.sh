@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.27
+# SNAPSTREAM MANAGER v1.0.28
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -1356,7 +1356,7 @@ services_menu(){
       3) restart_snapserver_with_confirm ;;
       4) restart_selected_ffmpeg_services ;;
       5) restart_all_ffmpeg_services ;;
-      6) rebuild_all_ffmpeg_units ;;
+      6) rebuild_all_units ;;
       7) return ;;
       *) ;;
     esac
@@ -1596,7 +1596,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.27 "
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.28 "
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
