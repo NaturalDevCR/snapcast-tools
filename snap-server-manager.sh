@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.28
+# SNAPSTREAM MANAGER v1.0.29
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -918,6 +918,8 @@ write_unit(){
   local stream_name="$3"
   local stream_id="$4"
   local fifo_path="$5"
+  local log_file
+  log_file="$(log_file_for "$stream_id")"
 
   cat > "${SYSTEMD_DIR}/${service_name}" <<EOF
 [Unit]
@@ -947,8 +949,8 @@ Restart=always
 RestartSec=5
 LimitNOFILE=65536
 
-StandardOutput=append:$(log_file_for "$stream_id")
-StandardError=append:$(log_file_for "$stream_id")
+StandardOutput=append:${log_file}
+StandardError=append:${log_file}
 
 [Install]
 WantedBy=multi-user.target
