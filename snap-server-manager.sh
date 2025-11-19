@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.30
+# SNAPSTREAM MANAGER v1.0.31
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
@@ -781,13 +781,22 @@ rebuild_all_units(){
       continue
     fi
 
-    # Tratar de extraer solo los INPUT_ARGS del FFmpeg
-    # Eliminamos todo lo que esté después del primer -acodec o -f s16le
+    # Extraer solo los INPUT_ARGS del FFmpeg
+    # Esto elimina:
+    # 1. Todo desde /usr/bin/ffmpeg hasta (e incluyendo) -rw_timeout y su valor
+    # 2. Todo desde -acodec hasta el final (opciones de output)
+    # Lo que queda debe ser solo los argumentos de input (típicamente -i <url> y opciones de input)
     local input_args
     input_args=$(echo "$old_line" \
-      | sed -E 's/^.*ffmpeg[[:space:]]+//' \
-      | sed -E 's/ -acodec.*$//' \
-      | sed -E 's/ -f s16le.*$//'
+      | sed -E 's|^.*/usr/bin/ffmpeg[[:space:]]+||' \
+      | sed -E 's/(-hide_banner|-nostats|-loglevel[[:space:]]+[^[:space:]]+|-nostdin)[[:space:]]*//g' \
+      | sed -E 's/(-reconnect[_a-z]*[[:space:]]+[0-9]+)[[:space:]]*//g' \
+      | sed -E 's/(-rw_timeout[[:space:]]+[0-9]+)[[:space:]]*//g' \
+      | sed -E 's/[[:space:]]*-acodec.*$//' \
+      | sed -E 's/[[:space:]]*-f[[:space:]]+s16le.*$//' \
+      | sed -E 's/\\[[:space:]]*//g' \
+      | sed -E 's/[[:space:]]+/ /g' \
+      | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//'
     )
 
     if [ -z "$input_args" ]; then
