@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.32
+# SNAPSTREAM MANAGER v1.0.33
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: NaturalDevCR”
@@ -781,32 +781,8 @@ rebuild_all_units(){
       continue
     fi
 
-    # Extraer solo los INPUT_ARGS del FFmpeg
-    # Esto elimina:
-    # 1. Todo desde /usr/bin/ffmpeg hasta (e incluyendo) -rw_timeout y su valor
-    # 2. Todo desde -acodec hasta el final (opciones de output)
-    # Lo que queda debe ser solo los argumentos de input (típicamente -i <url> y opciones de input)
-    local input_args
-    input_args=$(echo "$old_line" \
-      | sed -E 's|^.*/usr/bin/ffmpeg[[:space:]]+||' \
-      | sed -E 's/(-hide_banner|-nostats|-loglevel[[:space:]]+[^[:space:]]+|-nostdin)[[:space:]]*//g' \
-      | sed -E 's/(-reconnect[_a-z]*[[:space:]]+[0-9]+)[[:space:]]*//g' \
-      | sed -E 's/(-rw_timeout[[:space:]]+[0-9]+)[[:space:]]*//g' \
-      | sed -E 's/[[:space:]]*-acodec.*$//' \
-      | sed -E 's/[[:space:]]*-f[[:space:]]+s16le.*$//' \
-      | sed -E 's/\\[[:space:]]*//g' \
-      | sed -E 's/[[:space:]]+/ /g' \
-      | sed -E 's/^[[:space:]]+//;s/[[:space:]]+$//'
-    )
-
-    if [ -z "$input_args" ]; then
-       echo "  ⚠️  Could not reconstruct INPUT_ARGS — skipping."
-       continue
-    fi
-
-    # Construye FFmpeg desde tu nueva función
-    local new_ffmpeg_line
-    new_ffmpeg_line=$(ffmpeg_cmd_for "$input_args" "$fifo")
+    # Usar la línea completa del ExecStart como nuevo comando FFmpeg
+    local new_ffmpeg_line="$old_line"
 
     # Reescribe el unit con tu plantilla unificada
     write_unit "$service_name" "$new_ffmpeg_line" "$stream_name" "$stream_id" "$fifo"
@@ -2058,7 +2034,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.32"
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.33"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
