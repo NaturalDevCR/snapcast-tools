@@ -1,9 +1,9 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.31
+# SNAPSTREAM MANAGER v1.0.32
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
-# Author: Josue / GPT-5 / Gemini — “The Definitive Build.”
+# Author: NaturalDevCR”
 # Status: STABLE - Production ready.
 # ==============================================================================
 
@@ -752,7 +752,7 @@ get_stream_lines(){
     BEGIN { in_stream = 0 }
     /^[[:space:]]*\[stream\]/ { in_stream = 1; next }
     /^[[:space:]]*\[/ { if (in_stream) in_stream = 0 }
-    in_stream && /^[[:space:]]*source[[:space:]]*=[[:space:]]*pipe:/ { print }
+    in_stream && (/^[[:space:]]*source[[:space:]]*=[[:space:]]*pipe:/ || /^[[:space:]]*source[[:space:]]*=[[:space:]]*tcp:/) { print }
   ' "$CONF_FILE"
 }
 
@@ -1252,6 +1252,42 @@ add_or_replace_stream_line(){
   chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
 }
 
+##
+# add_or_replace_tcp_stream_line
+# Adds or updates a TCP source line in the `[stream]` section.
+# Format: source = tcp://0.0.0.0:<PORT>?name=<NAME>&codec=null&sampleformat=48000:16:2
+##
+add_or_replace_tcp_stream_line(){
+  local port="$1" name="$2" sample="48000:16:2"
+  local tmp_conf
+  tmp_conf="$(mktemp /tmp/snapserver.XXXXXXXXXX)" || {
+    log "ERROR" "Failed to create temporary file"
+    return 1
+  }
+  trap 'rm -f "$tmp_conf" 2>/dev/null' RETURN ERR
+
+  local new_line="source = tcp://0.0.0.0:${port}?name=${name}&codec=null&sampleformat=${sample}"
+
+  awk -v port="${port}" \
+      -v new_line="${new_line}" '
+      BEGIN { in_stream=0; found=0 }
+      /^\[stream\]/ { print; in_stream=1; next }
+      /^\[/ {
+          if (in_stream && !found) print new_line
+          in_stream=0
+      }
+      # Match existing TCP line with same port
+      in_stream && $0 ~ "tcp://0.0.0.0:" port { found=1; print new_line; next }
+      { print }
+      END {
+          if (in_stream && !found) print new_line
+      }
+  ' "$CONF_FILE" > "$tmp_conf"
+
+  mv "$tmp_conf" "$CONF_FILE"
+  chown "$SNAP_USER:$SNAP_GROUP" "$CONF_FILE"
+}
+
 
 ##
 # add_or_replace_metastream_line
@@ -1375,14 +1411,15 @@ create_stream(){
   echo "1) URL (HTTP/HTTPS/RTSP/RTMP)"
   echo "2) Local file (infinite loop)"
   echo "3) Custom FFmpeg (input arguments only)"
+  echo "4) TCP Source (e.g. Windows PC)"
 
-  local kind STREAM_NAME STREAM_ID FIFO_PATH SERVICE_NAME INPUT_ARGS URL FILE CUSTOM FFMPEG_LINE META_NAME RAW_NAME
+  local kind STREAM_NAME STREAM_ID FIFO_PATH SERVICE_NAME INPUT_ARGS URL FILE CUSTOM FFMPEG_LINE META_NAME RAW_NAME TCP_PORT
 
-  read -rp "Choose type [1-3]: " kind < /dev/tty
+  read -rp "Choose type [1-4]: " kind < /dev/tty
   
   # Validate numeric input
-  if ! kind=$(validate_number "$kind" 1 3 2>/dev/null); then
-    echo "❌ Invalid selection. Please enter 1, 2, or 3."
+  if ! kind=$(validate_number "$kind" 1 4 2>/dev/null); then
+    echo "❌ Invalid selection. Please enter 1, 2, 3, or 4."
     pause
     return
   fi
@@ -1391,10 +1428,12 @@ create_stream(){
   [ -z "$STREAM_NAME" ] && { echo "❌ Name is required."; pause; return; }
 
   STREAM_ID="$(mk_stream_id "$STREAM_NAME")"
-  FIFO_PATH="$(fifo_path_for "$STREAM_ID")"
-  SERVICE_NAME="$(service_name_for "$STREAM_ID")"
   META_NAME="$STREAM_NAME"
   RAW_NAME="$STREAM_ID"
+
+  # Common variables for FFmpeg-based streams (1-3)
+  FIFO_PATH="$(fifo_path_for "$STREAM_ID")"
+  SERVICE_NAME="$(service_name_for "$STREAM_ID")"
 
   case "$kind" in
     1)
@@ -1440,6 +1479,28 @@ create_stream(){
       
       log "INFO" "Creating custom FFmpeg stream: $STREAM_NAME"
       INPUT_ARGS="$CUSTOM"
+      ;;
+    4)
+      read -rp "TCP Port (e.g. 4953): " TCP_PORT < /dev/tty
+      if ! TCP_PORT=$(validate_number "$TCP_PORT" 1024 65535 2>/dev/null); then
+        echo "❌ Invalid port. Must be between 1024 and 65535."
+        pause
+        return
+      fi
+
+      log "INFO" "Creating TCP stream: $STREAM_NAME on port $TCP_PORT"
+      
+      # Add TCP source
+      add_or_replace_tcp_stream_line "$TCP_PORT" "$RAW_NAME"
+      
+      # Add MetaStream
+      add_or_replace_metastream_line "$RAW_NAME" "$META_NAME"
+      
+      systemctl restart snapserver
+      
+      echo "✅ TCP Stream '$STREAM_NAME' created on port $TCP_PORT."
+      pause
+      return
       ;;
     *)
       echo "❌ Invalid selection."
@@ -1556,18 +1617,40 @@ delete_streams(){
   IFS=',' read -ra CHOSEN <<<"$sel"
   for n in "${CHOSEN[@]}"; do
     entry="${sources[$((n-1))]}"
-    STREAM_ID="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
+    
+    # Extract ID: works for pipe://...snapfifo_ID?... OR tcp://...?name=ID...
+    if [[ "$entry" =~ snapfifo_ ]]; then
+        STREAM_ID="$(echo "$entry" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')"
+    else
+        STREAM_ID="$(echo "$entry" | sed -nE 's|.*name=([^&]+).*|\1|p')"
+    fi
+    
+    # Clean up ID (lowercase, alphanum) just in case
+    STREAM_ID="$(mk_stream_id "$STREAM_ID")"
+
+    echo "🗑️  Deleting stream $n ('${STREAM_ID}')..."
+
+    # Check if it's a pipe stream (has associated service)
     SVC="$(service_name_for "$STREAM_ID")"
-    LOG_FILE="$(log_file_for "$STREAM_ID")"
+    if [ -f "$SYSTEMD_DIR/$SVC" ]; then
+        echo "   • Stopping and removing service $SVC..."
+        systemctl stop "$SVC" 2>/dev/null || true
+        systemctl disable "$SVC" 2>/dev/null || true
+        systemctl stop "ffmpeg-watchdog@${STREAM_ID}.timer" 2>/dev/null || true
+        systemctl disable "ffmpeg-watchdog@${STREAM_ID}.timer" 2>/dev/null || true
 
-    echo "🗑️  Deleting stream $n ('${STREAM_ID}') and its associated service..."
-    systemctl stop "$SVC" 2>/dev/null || true
-    systemctl disable "$SVC" 2>/dev/null || true
-    systemctl stop "ffmpeg-watchdog@${STREAM_ID}.timer" 2>/dev/null || true
-    systemctl disable "ffmpeg-watchdog@${STREAM_ID}.timer" 2>/dev/null || true
+        rm -f "$SYSTEMD_DIR/$SVC" "${SNAP_FIFO_DIR}/snapfifo_${STREAM_ID}" "$(log_file_for "$STREAM_ID")"
+    fi
 
-    rm -f "$SYSTEMD_DIR/$SVC" "${SNAP_FIFO_DIR}/snapfifo_${STREAM_ID}" "$LOG_FILE"
+    # Remove from config (matches both pipe and tcp lines by name/fifo)
+    # We use a broader sed pattern to catch the line defining this source
+    # Pattern matches: source = ... name=STREAM_ID ... OR ... snapfifo_STREAM_ID ...
+    sed -i "/name=${STREAM_ID}/d" "$CONF_FILE"
     sed -i "/snapfifo_${STREAM_ID}/d" "$CONF_FILE"
+    
+    # Also remove the MetaStream associated with it
+    sed -i "/meta:\/\/\/${STREAM_ID}\/Silence/d" "$CONF_FILE"
+    
   done
   systemctl daemon-reload
   systemctl restart snapserver
@@ -1975,7 +2058,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.30"
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.32"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
