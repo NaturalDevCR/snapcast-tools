@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.39
+# SNAPSTREAM MANAGER v1.0.40
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: NaturalDevCR”
@@ -1701,9 +1701,15 @@ check_activity(){
     
     # 1. Estado del Servicio Systemd
     svc=$(service_name_for "$id")
-    # systemctl is-active devuelve exit code != 0 si no está activo.
-    svc_state=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
-    # Limpiar newlines que systemctl pueda dejar
+    
+    # Capturar output de systemctl. Si falla, el output suele ser "inactive" o "failed".
+    # Si el comando falla, bash sigue (por el set +e), pero queremos el output.
+    if ! svc_state=$(systemctl is-active "$svc" 2>/dev/null); then
+        # Si falló, svc_state ya tiene el output (ej. "inactive" o "failed").
+        # Si está vacío, asumimos unknown.
+        [ -z "$svc_state" ] && svc_state="unknown"
+    fi
+    # Limpiar newlines
     svc_state=$(echo "$svc_state" | tr -d '\n')
     
     case "$svc_state" in
@@ -1718,11 +1724,23 @@ check_activity(){
     # 2. Estado en Snapserver (RPC)
     snap_state="UNKNOWN"
     if [ -n "$server_status" ]; then
-      # Buscar el stream por su ID (nombre) en el JSON
-      local json_state
-      # Usamos || true en jq por seguridad
+      local json_state=""
+      local fifo_path
+      fifo_path=$(fifo_path_for "$id")
+      
+      # Intento 1: Buscar por ID exacto (name)
       json_state=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .status' 2>/dev/null || true)
       
+      # Intento 2: Buscar por URI Path (FIFO) si el ID falló
+      if [ -z "$json_state" ] || [ "$json_state" == "null" ]; then
+         json_state=$(echo "$server_status" | jq -r --arg p "$fifo_path" '.result.server.streams[] | select(.uri.path==$p) | .status' 2>/dev/null || true)
+      fi
+      
+      # Intento 3: Buscar por URI Query Name
+      if [ -z "$json_state" ] || [ "$json_state" == "null" ]; then
+         json_state=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.uri.query.name==$n) | .status' 2>/dev/null || true)
+      fi
+
       case "$json_state" in
         playing)   snap_state="▶️  Playing" ;;
         idle)      snap_state="⏸️  Idle" ;;
@@ -2116,7 +2134,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.39"
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.40"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
