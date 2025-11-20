@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.40
+# SNAPSTREAM MANAGER v1.0.41
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: NaturalDevCR”
@@ -1672,6 +1672,15 @@ delete_streams(){
   pause
 }
 
+get_all_stream_lines(){
+  awk '
+    BEGIN { in_stream = 0 }
+    /^[[:space:]]*\[stream\]/ { in_stream = 1; next }
+    /^[[:space:]]*\[/ { if (in_stream) in_stream = 0 }
+    in_stream && /^[[:space:]]*source[[:space:]]*=[[:space:]]*/ { print }
+  ' "$CONF_FILE"
+}
+
 check_activity(){
   # Desactivar exit-on-error temporalmente para evitar crashes en el dashboard
   set +e
@@ -1694,45 +1703,54 @@ check_activity(){
 
   while IFS= read -r line; do
     local name id svc svc_state snap_state display_svc display_snap
+    local is_pipe=false
     
     # Extraer datos del archivo de configuración
     name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
+    
+    # Intentar extraer ID de pipe (snapfifo_...)
     id=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
     
-    # 1. Estado del Servicio Systemd
-    svc=$(service_name_for "$id")
-    
-    # Capturar output de systemctl. Si falla, el output suele ser "inactive" o "failed".
-    # Si el comando falla, bash sigue (por el set +e), pero queremos el output.
-    if ! svc_state=$(systemctl is-active "$svc" 2>/dev/null); then
-        # Si falló, svc_state ya tiene el output (ej. "inactive" o "failed").
-        # Si está vacío, asumimos unknown.
-        [ -z "$svc_state" ] && svc_state="unknown"
+    if [ -n "$id" ]; then
+        is_pipe=true
+        # 1. Estado del Servicio Systemd (Solo para Pipes)
+        svc=$(service_name_for "$id")
+        
+        if ! svc_state=$(systemctl is-active "$svc" 2>/dev/null); then
+            [ -z "$svc_state" ] && svc_state="unknown"
+        fi
+        svc_state=$(echo "$svc_state" | tr -d '\n')
+        
+        case "$svc_state" in
+          active)      display_svc="🟢 Active" ;;
+          activating)  display_svc="🟡 Starting..." ;;
+          failed)      display_svc="🔴 Failed" ;;
+          inactive)    display_svc="⚪ Stopped" ;;
+          unknown)     display_svc="⚪ Unknown" ;;
+          *)           display_svc="❓ ${svc_state:0:10}" ;;
+        esac
+        
+        if [ "$svc_state" == "active" ]; then
+            ((active_services++))
+        fi
+    else
+        # No es un pipe (TCP, Meta, File, etc.)
+        display_svc="🔹 N/A (Internal)"
+        id="non_pipe_stream" # Placeholder
     fi
-    # Limpiar newlines
-    svc_state=$(echo "$svc_state" | tr -d '\n')
-    
-    case "$svc_state" in
-      active)      display_svc="🟢 Active" ;;
-      activating)  display_svc="🟡 Starting..." ;;
-      failed)      display_svc="🔴 Failed" ;;
-      inactive)    display_svc="⚪ Stopped" ;;
-      unknown)     display_svc="⚪ Unknown" ;;
-      *)           display_svc="❓ ${svc_state:0:10}" ;;
-    esac
 
     # 2. Estado en Snapserver (RPC)
     snap_state="UNKNOWN"
     if [ -n "$server_status" ]; then
       local json_state=""
-      local fifo_path
-      fifo_path=$(fifo_path_for "$id")
       
       # Intento 1: Buscar por ID exacto (name)
       json_state=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .status' 2>/dev/null || true)
       
-      # Intento 2: Buscar por URI Path (FIFO) si el ID falló
-      if [ -z "$json_state" ] || [ "$json_state" == "null" ]; then
+      # Intento 2: Buscar por URI Path (FIFO) si es pipe
+      if { [ -z "$json_state" ] || [ "$json_state" == "null" ]; } && [ "$is_pipe" == "true" ]; then
+         local fifo_path
+         fifo_path=$(fifo_path_for "$id")
          json_state=$(echo "$server_status" | jq -r --arg p "$fifo_path" '.result.server.streams[] | select(.uri.path==$p) | .status' 2>/dev/null || true)
       fi
       
@@ -1755,20 +1773,25 @@ check_activity(){
     printf " %-25s | %-18s | %-18s\n" "${name:0:25}" "$display_svc" "$snap_state"
     
     ((total_streams++))
-    if [ "$svc_state" == "active" ]; then
-        ((active_services++))
-    fi
     
-  done < <(get_stream_lines)
+  done < <(get_all_stream_lines)
 
   echo "══════════════════════════════════════════════════════════════════════"
   
   if [ "$total_streams" -eq 0 ]; then
     echo "   ❌ No streams configured."
   else
-    echo "   📊 Summary: $active_services / $total_streams services active."
+    echo "   📊 Summary: $active_services active systemd services."
   fi
   echo ""
+  
+  # Debug: Mostrar streams disponibles si hay conexión
+  if [ -n "$server_status" ]; then
+      echo "🔍 Debug: Available Streams in Snapserver:"
+      echo "$server_status" | jq -r '.result.server.streams[] | "   - ID: " + .id + " | Status: " + .status + " | URI: " + .uri.raw' 2>/dev/null | head -n 10
+      echo ""
+  fi
+  
   echo "🔎 To see logs: tail -f /var/log/ffmpeg/ffmpeg-<stream_id>.log"
   echo ""
   
@@ -2134,7 +2157,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.40"
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.41"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
