@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.37
+# SNAPSTREAM MANAGER v1.0.39
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: NaturalDevCR”
@@ -552,7 +552,7 @@ ensure_silence_fallback(){
     log "ERROR" "Failed to create temporary file"
     return 1
   }
-  trap 'rm -f "$tmp_conf" 2>/dev/null' RETURN ERR
+  trap "rm -f '$tmp_conf' 2>/dev/null" RETURN ERR
   
   local silence_line="source = process:///usr/bin/ffmpeg?name=Silence&codec=null&sampleformat=48000:16:2&params=-f lavfi -i anullsrc=r=48000:cl=stereo -f s16le -ar 48000 -ac 2 -"
 
@@ -1243,7 +1243,7 @@ add_or_replace_stream_line(){
     log "ERROR" "Failed to create temporary file"
     return 1
   }
-  trap 'rm -f "$tmp_conf" 2>/dev/null' RETURN ERR
+  trap "rm -f '$tmp_conf' 2>/dev/null" RETURN ERR
 
   local new_line="source = pipe:///${fifo}?name=${name}&codec=null&sampleformat=${sample}"
 
@@ -1278,7 +1278,7 @@ add_or_replace_tcp_stream_line(){
     log "ERROR" "Failed to create temporary file"
     return 1
   }
-  trap 'rm -f "$tmp_conf" 2>/dev/null' RETURN ERR
+  trap "rm -f '$tmp_conf' 2>/dev/null" RETURN ERR
 
   local new_line="source = tcp://0.0.0.0:${port}?name=${name}&codec=null&sampleformat=${sample}"
 
@@ -1321,7 +1321,7 @@ add_or_replace_metastream_line(){
     log "ERROR" "Failed to create temporary file"
     return 1
   }
-  trap 'rm -f "$tmp_conf" 2>/dev/null' RETURN ERR
+  trap "rm -f '$tmp_conf' 2>/dev/null" RETURN ERR
 
   local new_line="source = meta:///${source_name}/Silence?name=${meta_name}&codec=pcm&sampleformat=${sample}"
 
@@ -1673,6 +1673,9 @@ delete_streams(){
 }
 
 check_activity(){
+  # Desactivar exit-on-error temporalmente para evitar crashes en el dashboard
+  set +e
+  
   local server_status
   local total_streams=0
   local active_services=0
@@ -1699,7 +1702,6 @@ check_activity(){
     # 1. Estado del Servicio Systemd
     svc=$(service_name_for "$id")
     # systemctl is-active devuelve exit code != 0 si no está activo.
-    # Con set -e y pipefail, esto mata el script. Usamos || true para evitarlo.
     svc_state=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
     # Limpiar newlines que systemctl pueda dejar
     svc_state=$(echo "$svc_state" | tr -d '\n')
@@ -1718,7 +1720,7 @@ check_activity(){
     if [ -n "$server_status" ]; then
       # Buscar el stream por su ID (nombre) en el JSON
       local json_state
-      # Usamos || true en jq por seguridad, aunque jq suele ser seguro
+      # Usamos || true en jq por seguridad
       json_state=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .status' 2>/dev/null || true)
       
       case "$json_state" in
@@ -1751,6 +1753,9 @@ check_activity(){
   echo ""
   echo "🔎 To see logs: tail -f /var/log/ffmpeg/ffmpeg-<stream_id>.log"
   echo ""
+  
+  # Reactivar exit-on-error
+  set -e
   pause
 }
 
@@ -2111,7 +2116,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.37"
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.39"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
