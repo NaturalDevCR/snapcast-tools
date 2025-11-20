@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.36
+# SNAPSTREAM MANAGER v1.0.37
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: NaturalDevCR”
@@ -1735,7 +1735,9 @@ check_activity(){
     printf " %-25s | %-18s | %-18s\n" "${name:0:25}" "$display_svc" "$snap_state"
     
     ((total_streams++))
-    [ "$svc_state" == "active" ] && ((active_services++))
+    if [ "$svc_state" == "active" ]; then
+        ((active_services++))
+    fi
     
   done < <(get_stream_lines)
 
