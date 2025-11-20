@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.34
+# SNAPSTREAM MANAGER v1.0.35
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: NaturalDevCR”
@@ -1673,44 +1673,76 @@ delete_streams(){
 }
 
 check_activity(){
-  echo ""
-  echo "🎧 Current status of FFmpeg services:"
   local server_status
+  local total_streams=0
+  local active_services=0
+  
+  # Obtener estado de Snapserver una sola vez
   if ! server_status=$(rpc_status); then
-      echo "⚠️  Could not connect to Snapserver to check stream sources. Displaying service status only."
       server_status=""
   fi
-  
-  local i=1
+
+  echo ""
+  echo "══════════════════════════════════════════════════════════════════════"
+  echo " 🎧 STREAM STATUS DASHBOARD"
+  echo "══════════════════════════════════════════════════════════════════════"
+  printf " %-25s | %-18s | %-18s\n" "Stream Name" "Systemd Service" "Snapserver Source"
+  echo "───────────────────────────┼────────────────────┼───────────────────"
+
   while IFS= read -r line; do
-    local name id svc st source_status
+    local name id svc svc_state snap_state display_svc display_snap
+    
+    # Extraer datos del archivo de configuración
     name=$(echo "$line" | sed -nE 's/.*[?&]name=([^&]+).*/\1/p')
     id=$(echo "$line" | sed -nE 's|.*snapfifo_([^?]+)\?.*|\1|p')
-    svc=$(service_name_for "$id")
-    st=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
     
-    source_status="-"
+    # 1. Estado del Servicio Systemd
+    svc=$(service_name_for "$id")
+    svc_state=$(systemctl is-active "$svc" 2>/dev/null | tr -d '\n')
+    
+    case "$svc_state" in
+      active)      display_svc="🟢 Active" ;;
+      activating)  display_svc="🟡 Starting..." ;;
+      failed)      display_svc="🔴 Failed" ;;
+      inactive)    display_svc="⚪ Stopped" ;;
+      *)           display_svc="❓ $svc_state" ;;
+    esac
+
+    # 2. Estado en Snapserver (RPC)
+    snap_state="UNKNOWN"
     if [ -n "$server_status" ]; then
-      local current_uri
-      current_uri=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .uri.path')
+      # Buscar el stream por su ID (nombre) en el JSON
+      # Nota: En snapserver.conf usamos name=X, ese es el ID en el RPC.
+      local json_state
+      json_state=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .status')
       
-      if [[ "$current_uri" == *"/silence.fifo" ]]; then
-          source_status="FALLBACK"
-      elif [[ "$st" != "active" ]]; then
-          source_status="OFFLINE"
-      elif [ -n "$current_uri" ]; then
-          source_status="MAIN"
-      fi
+      case "$json_state" in
+        playing)   snap_state="▶️  Playing" ;;
+        idle)      snap_state="⏸️  Idle" ;;
+        suspended) snap_state="💤 Suspended" ;;
+        "")        snap_state="❌ Not Found" ;;
+        *)         snap_state="$json_state" ;;
+      esac
+    else
+      snap_state="⚠️  No Connection"
     fi
 
-    printf "  • %-22s | Service: %-10s | Source: %-8s\n" "'$name'" "$st" "$source_status"
-    ((i++))
+    printf " %-25s | %-18s | %-18s\n" "${name:0:25}" "$display_svc" "$snap_state"
+    
+    ((total_streams++))
+    [ "$svc_state" == "active" ] && ((active_services++))
+    
   done < <(get_stream_lines)
 
-  if [ "$i" -eq 1 ]; then echo "No streams configured."; fi
+  echo "══════════════════════════════════════════════════════════════════════"
   
+  if [ "$total_streams" -eq 0 ]; then
+    echo "   ❌ No streams configured."
+  else
+    echo "   📊 Summary: $active_services / $total_streams services active."
+  fi
   echo ""
-  echo "🔎 To see logs, run: tail -f /var/log/ffmpeg/ffmpeg-<stream_id>.log"
+  echo "🔎 To see logs: tail -f /var/log/ffmpeg/ffmpeg-<stream_id>.log"
   echo ""
   pause
 }
@@ -2072,7 +2104,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.34"
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.35"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
