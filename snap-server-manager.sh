@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# SNAPSTREAM MANAGER v1.0.35
+# SNAPSTREAM MANAGER v1.0.36
 # Snapserver + FFmpeg Streams + Snapweb + JSON-RPC + Backups + LXC-aware
 # Fixed loop bug, added timeout enforcement, and improved overall stability.
 # Author: NaturalDevCR”
@@ -1698,30 +1698,35 @@ check_activity(){
     
     # 1. Estado del Servicio Systemd
     svc=$(service_name_for "$id")
-    svc_state=$(systemctl is-active "$svc" 2>/dev/null | tr -d '\n')
+    # systemctl is-active devuelve exit code != 0 si no está activo.
+    # Con set -e y pipefail, esto mata el script. Usamos || true para evitarlo.
+    svc_state=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+    # Limpiar newlines que systemctl pueda dejar
+    svc_state=$(echo "$svc_state" | tr -d '\n')
     
     case "$svc_state" in
       active)      display_svc="🟢 Active" ;;
       activating)  display_svc="🟡 Starting..." ;;
       failed)      display_svc="🔴 Failed" ;;
       inactive)    display_svc="⚪ Stopped" ;;
-      *)           display_svc="❓ $svc_state" ;;
+      unknown)     display_svc="⚪ Unknown" ;;
+      *)           display_svc="❓ ${svc_state:0:10}" ;;
     esac
 
     # 2. Estado en Snapserver (RPC)
     snap_state="UNKNOWN"
     if [ -n "$server_status" ]; then
       # Buscar el stream por su ID (nombre) en el JSON
-      # Nota: En snapserver.conf usamos name=X, ese es el ID en el RPC.
       local json_state
-      json_state=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .status')
+      # Usamos || true en jq por seguridad, aunque jq suele ser seguro
+      json_state=$(echo "$server_status" | jq -r --arg n "$name" '.result.server.streams[] | select(.id==$n) | .status' 2>/dev/null || true)
       
       case "$json_state" in
         playing)   snap_state="▶️  Playing" ;;
         idle)      snap_state="⏸️  Idle" ;;
         suspended) snap_state="💤 Suspended" ;;
         "")        snap_state="❌ Not Found" ;;
-        *)         snap_state="$json_state" ;;
+        *)         snap_state="${json_state:0:15}" ;;
       esac
     else
       snap_state="⚠️  No Connection"
@@ -2104,7 +2109,7 @@ main_menu(){
     
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "  🧩 SNAPSTREAM MANAGER v1.0.35"
+    echo "  🧩 SNAPSTREAM MANAGER v1.0.36"
     echo "═══════════════════════════════════════════════════"
     echo "     🎚️  ${active_count} FFmpeg stream(s) currently running"
     echo "═══════════════════════════════════════════════════"
