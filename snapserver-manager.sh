@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.1.0"
+VERSION="1.1.1"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -200,11 +200,9 @@ kill_zombie_connections() {
     log_info "Checking for zombie connections on port $port..."
     
     # Find all ESTABLISHED connections on this port that appear to be zombies
-    # A zombie connection is ESTABLISHED but has no active timer (keepalive/retransmit)
+    # A zombie connection is ESTABLISHED but has Send-Q > 0 (server trying to send to dead client)
     local zombie_connections=$(ss -tn state established "( sport = :${port} or dport = :${port} )" 2>/dev/null | \
-        grep -v "timer:" | \
-        grep "ESTAB" | \
-        awk 'NR>1 {print $4":"$5}')
+        awk 'NR>1 && $3 > 0 {print $4":"$5}')
     
     if [[ -z "$zombie_connections" ]]; then
         log_info "No zombie connections found on port $port"
@@ -394,10 +392,9 @@ kill_zombie_connections() {
     log_msg "Checking port $port for zombie connections"
     
     # Find all ESTABLISHED connections on this port that appear to be zombies
+    # A zombie connection is ESTABLISHED but has Send-Q > 0 (server trying to send to dead client)
     local zombie_connections=$(ss -tn state established "( sport = :${port} or dport = :${port} )" 2>/dev/null | \
-        grep -v "timer:" | \
-        grep "ESTAB" | \
-        awk 'NR>1 {print $4":"$5}')
+        awk 'NR>1 && $3 > 0 {print $4":"$5}')
     
     if [[ -z "$zombie_connections" ]]; then
         return 0
