@@ -316,15 +316,15 @@ install_tcp_watchdog() {
         if [[ -z "$source_name" ]]; then
             source_name="(unnamed)"
         fi
-        echo "  • Port ${BOLD}${port}${NC} - ${source_name}"
+        echo -e "  • Port ${BOLD}${port}${NC} - ${source_name}"
     done <<< "$ports"
     
     echo ""
     echo -e "${BOLD}Watchdog Behavior:${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "  • Monitors the above TCP port(s) for zombie connections"
-    echo "  • Runs automatically every ${BOLD}2 minutes${NC}"
-    echo "  • Closes stuck connections (${BOLD}FD only${NC}, not the entire process)"
+    echo -e "  • Monitors the above TCP port(s) for zombie connections"
+    echo -e "  • Runs automatically every ${BOLD}2 minutes${NC}"
+    echo -e "  • Closes stuck connections (${BOLD}FD only${NC}, not the entire process)"
     echo "  • Logs activity to /var/log/snapcast-tcp-watchdog.log"
     echo ""
     

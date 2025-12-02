@@ -2,7 +2,33 @@
 
 Scripts to manage and make things easier with snapcast
 
-## snap-server-manager.sh:
+## snapserver-manager.sh (Simple & Quick)
+
+A lightweight manager for Snapserver with TCP Watchdog support.
+
+Run directly on Debian/Ubuntu:
+
+```bash
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snapserver-manager.sh)"
+```
+
+Alternative:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snapserver-manager.sh | bash
+```
+
+**Features:**
+
+- Install/Update Snapserver
+- Service Management
+- View Logs
+- Manage TCP Sources
+- **TCP Watchdog** - Monitors and kills zombie TCP connections automatically
+
+---
+
+## snap-server-manager.sh (Advanced):
 
 Run directly on Debian:
 
