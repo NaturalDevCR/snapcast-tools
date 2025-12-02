@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.1.1"
+VERSION="1.2.0"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -191,18 +191,43 @@ check_zombie_connections() {
         cut -d: -f1
 }
 
-# Kill zombie TCP connections for a specific port
+# Kill zombie TCP connections for a specific port (INGESTION MODE)
 # NOTE: This closes only the specific TCP connection (FD), NOT the entire process
+# INGESTION MODE: Laptop sends audio TO Snapserver (server receives, doesn't send)
 kill_zombie_connections() {
     local port="$1"
     local killed_count=0
     
-    log_info "Checking for zombie connections on port $port..."
+    log_info "Checking for zombie connections on port $port (Ingestion Mode)..."
     
-    # Find all ESTABLISHED connections on this port that appear to be zombies
-    # A zombie connection is ESTABLISHED but has Send-Q > 0 (server trying to send to dead client)
-    local zombie_connections=$(ss -tn state established "( sport = :${port} or dport = :${port} )" 2>/dev/null | \
-        awk 'NR>1 && $3 > 0 {print $4":"$5}')
+    # IMPROVED DETECTION FOR INGESTION (Client sends -> Server receives)
+    # When laptop dies/disconnects badly:
+    # - Recv-Q and Send-Q are often BOTH 0 (server isn't sending, just receiving)
+    # - The KEY indicator is the TCP timer showing retransmission attempts
+    # 
+    # We look for connections that are:
+    # 1. ESTABLISHED with timer:(onack,...) - kernel is retransmitting ACKs, client not responding
+    # 2. ESTABLISHED with ANY Send-Q > 0 - in pure ingestion, Send-Q should be 0; any data stuck = dead client
+    
+    # Use ss -to to show timer information (-o = show timers)
+    local zombie_connections=$(ss -to state established "( sport = :${port} )" 2>/dev/null | \
+        awk 'NR>1 {
+            # $1=State, $2=Recv-Q, $3=Send-Q, $4=Local, $5=Peer, rest=timer info
+            recv_q = $2;
+            send_q = $3;
+            local_addr = $4;
+            peer_addr = $5;
+            
+            # Condition A: Send queue has data stuck (in pure ingestion this should be 0)
+            is_stuck = (send_q > 0);
+            
+            # Condition B: Timer shows "onack" (active retransmission)
+            is_retrans = ($0 ~ /timer:\(on[[:space:]]*,/ || $0 ~ /timer:\(onack/);
+            
+            if (is_stuck || is_retrans) {
+                print peer_addr
+            }
+        }')
     
     if [[ -z "$zombie_connections" ]]; then
         log_info "No zombie connections found on port $port"
@@ -210,29 +235,24 @@ kill_zombie_connections() {
     fi
     
     # Process each zombie connection
-    while IFS= read -r conn; do
-        if [[ -z "$conn" ]]; then
+    while IFS= read -r remote_addr; do
+        if [[ -z "$remote_addr" ]]; then
             continue
         fi
         
-        # Extract local and remote addresses
-        local src=$(echo "$conn" | cut -d: -f1-2)
-        local dst=$(echo "$conn" | cut -d: -f3-4)
-        
-        log_warn "Found zombie connection: $src -> $dst"
+        log_warn "Found zombie connection (retransmitting/stuck): $remote_addr"
         
         # Use ss -K to kill only this specific connection (closes the socket/FD, not the process)
-        # This is the safe way to close a TCP connection without killing the process
-        if ss -K "sport = :${port}" dst "$dst" 2>/dev/null; then
+        if ss -K dst "$remote_addr" 2>/dev/null; then
             ((killed_count++))
-            log_success "Closed zombie connection: $src -> $dst"
+            log_success "Closed zombie connection: $remote_addr"
         else
-            # Fallback: Try with different syntax
-            if ss -K sport = :${port} dst ${dst} 2>/dev/null; then
+            # Fallback: Try with sport filter
+            if ss -K "sport = :${port}" dst "$remote_addr" 2>/dev/null; then
                 ((killed_count++))
-                log_success "Closed zombie connection: $src -> $dst (fallback method)"
+                log_success "Closed zombie connection: $remote_addr (fallback method)"
             else
-                log_warn "Failed to close connection: $src -> $dst"
+                log_warn "Failed to close connection: $remote_addr"
             fi
         fi
         
@@ -389,34 +409,55 @@ kill_zombie_connections() {
     local port="$1"
     local killed_count=0
     
-    log_msg "Checking port $port for zombie connections"
+    log_msg "Checking port $port for zombie connections (Ingestion Mode)"
     
-    # Find all ESTABLISHED connections on this port that appear to be zombies
-    # A zombie connection is ESTABLISHED but has Send-Q > 0 (server trying to send to dead client)
-    local zombie_connections=$(ss -tn state established "( sport = :${port} or dport = :${port} )" 2>/dev/null | \
-        awk 'NR>1 && $3 > 0 {print $4":"$5}')
+    # IMPROVED DETECTION FOR INGESTION (Client sends -> Server receives)
+    # When laptop dies/disconnects badly:
+    # - Recv-Q and Send-Q are often BOTH 0 (server isn't sending, just receiving)
+    # - The KEY indicator is the TCP timer showing retransmission attempts
+    # 
+    # We look for connections that are:
+    # 1. ESTABLISHED with timer:(onack,...) - kernel is retransmitting ACKs, client not responding
+    # 2. ESTABLISHED with ANY Send-Q > 0 - in pure ingestion, Send-Q should be 0; any data stuck = dead client
+    
+    # Use ss -to to show timer information (-o = show timers)
+    local zombie_connections=$(ss -to state established "( sport = :${port} )" 2>/dev/null | \
+        awk 'NR>1 {
+            # $1=State, $2=Recv-Q, $3=Send-Q, $4=Local, $5=Peer, rest=timer info
+            recv_q = $2;
+            send_q = $3;
+            local_addr = $4;
+            peer_addr = $5;
+            
+            # Condition A: Send queue has data stuck (in pure ingestion this should be 0)
+            is_stuck = (send_q > 0);
+            
+            # Condition B: Timer shows "onack" (active retransmission)
+            is_retrans = ($0 ~ /timer:\(on[[:space:]]*,/ || $0 ~ /timer:\(onack/);
+            
+            if (is_stuck || is_retrans) {
+                print peer_addr
+            }
+        }')
     
     if [[ -z "$zombie_connections" ]]; then
         return 0
     fi
     
-    while IFS= read -r conn; do
-        [[ -z "$conn" ]] && continue
+    while IFS= read -r remote_addr; do
+        [[ -z "$remote_addr" ]] && continue
         
-        local src=$(echo "$conn" | cut -d: -f1-2)
-        local dst=$(echo "$conn" | cut -d: -f3-4)
-        
-        log_msg "Found zombie: $src -> $dst"
+        log_msg "Found zombie: $remote_addr (retransmitting/stuck)"
         
         # Use ss -K to kill only this specific connection (closes the socket/FD)
-        if ss -K "sport = :${port}" dst "$dst" 2>/dev/null; then
+        if ss -K dst "$remote_addr" 2>/dev/null; then
             ((killed_count++))
-            log_msg "Closed zombie: $src -> $dst"
-        elif ss -K sport = :${port} dst ${dst} 2>/dev/null; then
+            log_msg "Closed zombie: $remote_addr"
+        elif ss -K "sport = :${port}" dst "$remote_addr" 2>/dev/null; then
             ((killed_count++))
-            log_msg "Closed zombie: $src -> $dst (fallback)"
+            log_msg "Closed zombie: $remote_addr (fallback)"
         else
-            log_msg "Failed to close: $src -> $dst"
+            log_msg "Failed to close: $remote_addr"
         fi
     done <<< "$zombie_connections"
     
