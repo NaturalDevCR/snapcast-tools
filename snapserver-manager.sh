@@ -702,3 +702,5 @@ main() {
     check_proxmox_lxc
     show_menu
 }
+
+main
