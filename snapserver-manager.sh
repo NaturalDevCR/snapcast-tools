@@ -2,7 +2,9 @@
 
 # Snapserver Manager Script
 # A simple, clean manager for Snapserver installations
-# Supports: Proxmox LXC, TCP Sources, Log Viewing, Service Management
+# Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
+
+VERSION="1.1.0"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -662,7 +664,7 @@ show_menu() {
     while true; do
         clear
         echo -e "${CYAN}==================================================${NC}"
-        echo -e "${BOLD}         Snapserver Manager v1.0                  ${NC}"
+        echo -e "${BOLD}         Snapserver Manager v${VERSION}              ${NC}"
         echo -e "${CYAN}==================================================${NC}"
         
         # Status Check
