@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.4.0"
+VERSION="1.5.0"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -252,8 +252,10 @@ kill_zombie_connections() {
 
     # 2. Second Pass: Detect Multiple Connections from Same IP (Cleanup)
     # ------------------------------------------------------------------
-    # If duplicates persist (e.g. multiple "valid" snapserver connections from same IP),
-    # keep the one with LOWEST Recv-Q (most likely the freshest active stream)
+    # ZERO TOLERANCE POLICY:
+    # If a client IP has multiple connections to the same port, the state is inconsistent.
+    # It is safer to kill ALL connections from that IP (including "valid" ones) to force
+    # a clean, fresh reconnection from the client.
     
     # Get all established connections
     local duplicate_candidates=$(ss -tn state established "( sport = :${port} )" 2>/dev/null | \
@@ -261,8 +263,7 @@ kill_zombie_connections() {
             split($5, a, ":");
             ip = a[1];
             port = a[2];
-            recv_q = $2;
-            print ip, port, recv_q;
+            print ip, port;
         }' | sort)
     
     local multi_conn_ips=$(echo "$duplicate_candidates" | awk '{print $1}' | uniq -d)
@@ -271,26 +272,20 @@ kill_zombie_connections() {
         while IFS= read -r ip; do
             [[ -z "$ip" ]] && continue
             
-            log_info "Analyzing multiple connections from IP: $ip"
+            log_warn "Detected multiple connections from IP: $ip (Bad State)"
+            log_info "Applying Zero Tolerance: Resetting all connections for $ip..."
+            
             local conns=$(echo "$duplicate_candidates" | grep "^$ip ")
             
-            # Check count again
-            local count=$(echo "$conns" | wc -l)
-            if [[ $count -le 1 ]]; then continue; fi
-            
-            # Strategy: Keep LOWEST Recv-Q
-            local keep_port=$(echo "$conns" | sort -k3,3n | head -n 1 | awk '{print $2}')
-            
+            # Kill ALL connections for this IP
             while IFS= read -r line; do
                 local c_ip=$(echo "$line" | awk '{print $1}')
                 local c_port=$(echo "$line" | awk '{print $2}')
                 
-                if [[ "$c_port" != "$keep_port" ]]; then
-                    log_warn "Killing duplicate connection: $c_ip:$c_port"
-                    if ss -K dst "${c_ip}:${c_port}" 2>/dev/null; then
-                        ((killed_count++))
-                        log_success "Closed duplicate: $c_ip:$c_port"
-                    fi
+                log_warn "Force closing: $c_ip:$c_port"
+                if ss -K dst "${c_ip}:${c_port}" 2>/dev/null; then
+                    ((killed_count++))
+                    log_success "Closed: $c_ip:$c_port"
                 fi
             done <<< "$conns"
             
@@ -490,19 +485,21 @@ kill_zombie_connections() {
                 ((killed_count++))
                 log_msg "Closed zombie: $remote_addr"
             fi
-        done <<< "$explicit_zombies"
-    fi
 
     # 2. Second Pass: Detect Multiple Connections from Same IP (Cleanup)
     # ------------------------------------------------------------------
+    # ZERO TOLERANCE POLICY:
+    # If a client IP has multiple connections to the same port, the state is inconsistent.
+    # It is safer to kill ALL connections from that IP (including "valid" ones) to force
+    # a clean, fresh reconnection from the client.
+    
     # Get all established connections
     local duplicate_candidates=$(ss -tn state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
             split($5, a, ":");
             ip = a[1];
             port = a[2];
-            recv_q = $2;
-            print ip, port, recv_q;
+            print ip, port;
         }' | sort)
     
     local multi_conn_ips=$(echo "$duplicate_candidates" | awk '{print $1}' | uniq -d)
@@ -511,26 +508,20 @@ kill_zombie_connections() {
         while IFS= read -r ip; do
             [[ -z "$ip" ]] && continue
             
-            log_msg "Analyzing multiple connections from IP: $ip"
+            log_msg "Detected multiple connections from IP: $ip (Bad State)"
+            log_msg "Applying Zero Tolerance: Resetting all connections for $ip..."
+            
             local conns=$(echo "$duplicate_candidates" | grep "^$ip ")
             
-            # Check count again
-            local count=$(echo "$conns" | wc -l)
-            if [[ $count -le 1 ]]; then continue; fi
-            
-            # Strategy: Keep LOWEST Recv-Q
-            local keep_port=$(echo "$conns" | sort -k3,3n | head -n 1 | awk '{print $2}')
-            
+            # Kill ALL connections for this IP
             while IFS= read -r line; do
                 local c_ip=$(echo "$line" | awk '{print $1}')
                 local c_port=$(echo "$line" | awk '{print $2}')
                 
-                if [[ "$c_port" != "$keep_port" ]]; then
-                    log_msg "Killing duplicate connection: $c_ip:$c_port"
-                    if ss -K dst "${c_ip}:${c_port}" 2>/dev/null; then
-                        ((killed_count++))
-                        log_msg "Closed duplicate: $c_ip:$c_port"
-                    fi
+                log_msg "Force closing: $c_ip:$c_port"
+                if ss -K dst "${c_ip}:${c_port}" 2>/dev/null; then
+                    ((killed_count++))
+                    log_msg "Closed: $c_ip:$c_port"
                 fi
             done <<< "$conns"
             
