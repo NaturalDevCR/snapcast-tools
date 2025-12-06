@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.1"
+VERSION="1.5.2"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -868,6 +868,6 @@ main() {
     show_menu
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
-    main
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]] || [[ -z "${BASH_SOURCE[0]}" ]]; then
+    main "$@"
 fi
