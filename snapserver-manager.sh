@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.0"
+VERSION="1.5.1"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -16,7 +16,7 @@ BOLD='\033[1m'
 NC='\033[0m' # No Color
 
 # --- Global Variables ---
-CONFIG_FILE="/etc/snapserver.conf"
+CONFIG_FILE=${CONFIG_FILE:-"/etc/snapserver.conf"}
 SERVICE_NAME="snapserver"
 LOG_FILE="/var/log/snapserver-manager.log"
 
@@ -59,6 +59,20 @@ check_dependencies() {
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_warn "Missing dependencies: ${missing[*]}"
+        
+        # Prompt user for installation
+        echo -e "${YELLOW}The following packages need to be installed:${NC}"
+        for dep in "${missing[@]}"; do
+            echo -e "  - $dep"
+        done
+        echo ""
+        read -p "Do you want to proceed with the installation? (y/N): " choice
+        
+        if [[ ! "$choice" =~ ^[Yy]$ ]]; then
+            log_error "Installation aborted by user."
+            exit 1
+        fi
+
         log_info "Installing missing dependencies..."
         
         # Map netstat to net-tools package
@@ -700,12 +714,13 @@ manage_tcp_watchdog() {
 
 # --- TCP Source Management ---
 
-manage_tcp_sources() {
+manage_sources() {
     while true; do
         clear
         echo -e "${CYAN}--- TCP Source Management ---${NC}"
         echo -e "Current TCP Sources in $CONFIG_FILE:"
         echo -e "${YELLOW}"
+        # Display sources with their comments if possible, or just the config lines
         grep "source = tcp://" "$CONFIG_FILE" || echo "No TCP sources found."
         echo -e "${NC}"
         echo -e "${CYAN}-----------------------------${NC}"
@@ -721,38 +736,81 @@ manage_tcp_sources() {
                 port=${port:-4953}
                 read -p "Enter Name (e.g., Spotify): " name
                 name=${name:-TCP_Stream}
+                read -p "Enter Codec (default pcm): " codec
+                codec=${codec:-pcm}
+                read -p "Enter Sample Format (default 48000:16:2): " sampleformat
+                sampleformat=${sampleformat:-48000:16:2}
                 
-                SOURCE_LINE="source = tcp://0.0.0.0:${port}?name=${name}"
+                # Sanitize name (remove spaces)
+                safe_name=$(echo "$name" | tr -d ' ')
+
+                # Construct the comment and source line
+                COMMENT_LINE="# ${name} TCP"
+                SOURCE_LINE="source = tcp://0.0.0.0:${port}?name=${safe_name}&codec=${codec}&sampleformat=${sampleformat}&idle_threshold=2000&send_silence=true&retry=3&timeout=5"
                 
                 # Check if [stream] section exists
                 if ! grep -q "^\[stream\]" "$CONFIG_FILE"; then
                     echo "" >> "$CONFIG_FILE"
                     echo "[stream]" >> "$CONFIG_FILE"
+                    echo "codec = pcm" >> "$CONFIG_FILE"
                 fi
                 
-                # Append source to [stream] section
-                # Using sed to insert after [stream] is safer but appending is easier for now
-                # Ideally we want to append to the end of the file or specifically under [stream]
-                # Simple approach: Append to end of file if it doesn't exist, or use sed to append after [stream]
+                # Update global codec if [stream] exists but codec is not set (optional enhancement, but safer to respect existing)
+                # For now, just append the source implementation
                 
-                # Better approach: Just append to the file. Snapserver reads all source lines.
+                # Append to file
+                echo "" >> "$CONFIG_FILE"
+                echo "$COMMENT_LINE" >> "$CONFIG_FILE"
                 echo "$SOURCE_LINE" >> "$CONFIG_FILE"
                 
-                log_success "Added: $SOURCE_LINE"
-                log_info "Restarting Snapserver to apply changes..."
-                systemctl restart "$SERVICE_NAME"
+                log_success "Added source: $name on port $port ($codec, $sampleformat)"
+                
+                # Optional: Restart service
+                read -p "Restart Snapserver now? (y/N): " restart_opt
+                if [[ "$restart_opt" =~ ^[Yy]$ ]]; then
+                    systemctl restart "$SERVICE_NAME"
+                    log_success "Service restarted."
+                fi
                 read -p "Press Enter to continue..."
                 ;;
             2)
-                echo -e "${YELLOW}Select a line number to delete:${NC}"
+                echo -e "${YELLOW}Select a source to delete:${NC}"
+                # Get lines with line numbers
                 grep -n "source = tcp://" "$CONFIG_FILE"
-                read -p "Line number: " line_num
                 
-                if [[ -n "$line_num" ]]; then
-                    sed -i "${line_num}d" "$CONFIG_FILE"
-                    log_success "Removed line $line_num"
-                    log_info "Restarting Snapserver to apply changes..."
-                    systemctl restart "$SERVICE_NAME"
+                if [[ $? -ne 0 ]]; then
+                     echo "No sources to delete."
+                     read -p "Press Enter to continue..."
+                     continue
+                fi
+
+                read -p "Enter the line number of the source to delete: " line_num
+                
+                if [[ -n "$line_num" && "$line_num" =~ ^[0-9]+$ ]]; then
+                    # Check if the previous line is a comment associated with this source
+                    # We look at line_num - 1
+                    prev_line_num=$((line_num - 1))
+                    
+                    # Read the content of the previous line
+                    prev_line_content=$(sed "${prev_line_num}q;d" "$CONFIG_FILE")
+                    
+                    # Delete the source line
+                    sed -i.bak "${line_num}d" "$CONFIG_FILE"
+                    rm "${CONFIG_FILE}.bak"
+                    log_success "Removed source line."
+
+                    # Check if previous line looks like our generated comment (starts with # and contains TCP)
+                    if [[ "$prev_line_content" =~ ^#.*TCP.*$ ]]; then
+                        sed -i.bak "${prev_line_num}d" "$CONFIG_FILE"
+                        rm "${CONFIG_FILE}.bak"
+                        log_success "Removed associated comment."
+                    fi
+                    
+                    read -p "Restart Snapserver now? (y/N): " restart_opt
+                    if [[ "$restart_opt" =~ ^[Yy]$ ]]; then
+                        systemctl restart "$SERVICE_NAME"
+                         log_success "Service restarted."
+                    fi
                 else
                     log_error "Invalid line number."
                 fi
@@ -794,7 +852,7 @@ show_menu() {
             1) install_snapserver ;;
             2) manage_service ;;
             3) view_logs ;;
-            4) manage_tcp_sources ;;
+            4) manage_sources ;;
             5) manage_tcp_watchdog ;;
             6) exit 0 ;;
             *) log_error "Invalid option." ; sleep 1 ;;
@@ -810,4 +868,6 @@ main() {
     show_menu
 }
 
-main
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    main
+fi
