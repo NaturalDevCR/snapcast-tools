@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.2.0"
+VERSION="1.3.0"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -202,12 +202,9 @@ kill_zombie_connections() {
     
     # IMPROVED DETECTION FOR INGESTION (Client sends -> Server receives)
     # When laptop dies/disconnects badly:
-    # - Recv-Q and Send-Q are often BOTH 0 (server isn't sending, just receiving)
-    # - The KEY indicator is the TCP timer showing retransmission attempts
-    # 
-    # We look for connections that are:
     # 1. ESTABLISHED with timer:(onack,...) - kernel is retransmitting ACKs, client not responding
     # 2. ESTABLISHED with ANY Send-Q > 0 - in pure ingestion, Send-Q should be 0; any data stuck = dead client
+    # 3. ESTABLISHED with HIGH Recv-Q > 4096 - Data is stuck in buffer but server/app not draining it
     
     # Use ss -to to show timer information (-o = show timers)
     local zombie_connections=$(ss -to state established "( sport = :${port} )" 2>/dev/null | \
@@ -219,12 +216,16 @@ kill_zombie_connections() {
             peer_addr = $5;
             
             # Condition A: Send queue has data stuck (in pure ingestion this should be 0)
-            is_stuck = (send_q > 0);
+            is_stuck_send = (send_q > 0);
             
-            # Condition B: Timer shows "onack" (active retransmission)
+            # Condition B: Recv queue has significant data stuck (stuck > 4kb)
+            # This handles cases where data arrived but connection died or app is stuck
+            is_stuck_recv = (recv_q > 4096);
+            
+            # Condition C: Timer shows "onack" or retransmission
             is_retrans = ($0 ~ /timer:\(on[[:space:]]*,/ || $0 ~ /timer:\(onack/);
             
-            if (is_stuck || is_retrans) {
+            if (is_stuck_send || is_stuck_recv || is_retrans) {
                 print peer_addr
             }
         }')
@@ -240,7 +241,7 @@ kill_zombie_connections() {
             continue
         fi
         
-        log_warn "Found zombie connection (retransmitting/stuck): $remote_addr"
+        log_warn "Found zombie connection (retrans/stuck): $remote_addr"
         
         # Use ss -K to kill only this specific connection (closes the socket/FD, not the process)
         if ss -K dst "$remote_addr" 2>/dev/null; then
@@ -413,12 +414,9 @@ kill_zombie_connections() {
     
     # IMPROVED DETECTION FOR INGESTION (Client sends -> Server receives)
     # When laptop dies/disconnects badly:
-    # - Recv-Q and Send-Q are often BOTH 0 (server isn't sending, just receiving)
-    # - The KEY indicator is the TCP timer showing retransmission attempts
-    # 
-    # We look for connections that are:
     # 1. ESTABLISHED with timer:(onack,...) - kernel is retransmitting ACKs, client not responding
     # 2. ESTABLISHED with ANY Send-Q > 0 - in pure ingestion, Send-Q should be 0; any data stuck = dead client
+    # 3. ESTABLISHED with HIGH Recv-Q > 4096 - Data is stuck in buffer but server/app not draining it
     
     # Use ss -to to show timer information (-o = show timers)
     local zombie_connections=$(ss -to state established "( sport = :${port} )" 2>/dev/null | \
@@ -430,12 +428,16 @@ kill_zombie_connections() {
             peer_addr = $5;
             
             # Condition A: Send queue has data stuck (in pure ingestion this should be 0)
-            is_stuck = (send_q > 0);
+            is_stuck_send = (send_q > 0);
             
-            # Condition B: Timer shows "onack" (active retransmission)
+            # Condition B: Recv queue has significant data stuck (stuck > 4kb)
+            # This handles cases where data arrived but connection died or app is stuck
+            is_stuck_recv = (recv_q > 4096);
+            
+            # Condition C: Timer shows "onack" or retransmission
             is_retrans = ($0 ~ /timer:\(on[[:space:]]*,/ || $0 ~ /timer:\(onack/);
             
-            if (is_stuck || is_retrans) {
+            if (is_stuck_send || is_stuck_recv || is_retrans) {
                 print peer_addr
             }
         }')
@@ -447,7 +449,7 @@ kill_zombie_connections() {
     while IFS= read -r remote_addr; do
         [[ -z "$remote_addr" ]] && continue
         
-        log_msg "Found zombie: $remote_addr (retransmitting/stuck)"
+        log_msg "Found zombie: $remote_addr (retrans/stuck)"
         
         # Use ss -K to kill only this specific connection (closes the socket/FD)
         if ss -K dst "$remote_addr" 2>/dev/null; then
