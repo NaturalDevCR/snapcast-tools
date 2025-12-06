@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.3.0"
+VERSION="1.4.0"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -198,36 +198,51 @@ kill_zombie_connections() {
     local port="$1"
     local killed_count=0
     
-    log_info "Checking for zombie/duplicate connections on port $port (Ingestion Mode)..."
+    log_info "Checking for zombie/orphaned connections on port $port (Ingestion Mode)..."
     
-    # 1. First Pass: Detect explicit zombies (timers or high Send/Recv Q)
-    # ------------------------------------------------------------------
-    # Use ss -to to show timer information
-    local explicit_zombies=$(ss -to state established "( sport = :${port} )" 2>/dev/null | \
+    # 1. First Pass: Detect ORPHANED and EXPLICIT DEAD connections
+    # -------------------------------------------------------------
+    # Orphaned: No process (snapserver) attached (ghosts usually lack process info in ss output)
+    # Dead: Timer onack (retransmitting) or Send-Q blocked
+    # NOTE: We removed Recv-Q check because audio buffers are naturally large (~90k is normal)
+    
+    # Use ss -top to show timer information AND process information
+    local explicit_zombies=$(ss -top state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
+            # Capture full line for regex checks
+            line = $0;
+            
+            # Extract basic fields
             recv_q = $2;
             send_q = $3;
             peer_addr = $5;
             
-            # Condition A: Stuck Send-Q (any data in purely ingest stream is suspicious)
+            # Condition A: ORPHANED SOCKET (The "Ghost" Detector)
+            # Valid connections have users:(("snapserver"... associated.
+            # Ghosts usually have no process info or different info.
+            # We look for absence of "snapserver" in the line.
+            is_orphan = (line !~ /users:\(\("snapserver"/);
+            
+            # Condition B: Stuck Send-Q (any data in purely ingest stream is suspicious)
             is_stuck_send = (send_q > 0);
             
-            # Condition B: High Recv-Q (client sent data but app not reading it -> likely dead/stuck)
-            is_stuck_recv = (recv_q > 4096);
-            
             # Condition C: Retransmission timer active
-            is_retrans = ($0 ~ /timer:\(on[[:space:]]*,/ || $0 ~ /timer:\(onack/);
+            is_retrans = (line ~ /timer:\(on[[:space:]]*,/ || line ~ /timer:\(onack/);
             
-            if (is_stuck_send || is_stuck_recv || is_retrans) {
-                print peer_addr
+            if (is_orphan || is_stuck_send || is_retrans) {
+                # Add reason for log (optional, just print IP for now)
+                print peer_addr, (is_orphan ? "ORPHAN" : "DEAD")
             }
         }')
     
     # Kill explicit zombies first
     if [[ -n "$explicit_zombies" ]]; then
-        while IFS= read -r remote_addr; do
-            [[ -z "$remote_addr" ]] && continue
-            log_warn "Found stuck/dead connection: $remote_addr"
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local remote_addr=$(echo "$line" | awk '{print $1}')
+            local reason=$(echo "$line" | awk '{print $2}')
+            
+            log_warn "Found $reason connection: $remote_addr"
             if ss -K dst "$remote_addr" 2>/dev/null; then
                 ((killed_count++))
                 log_success "Closed zombie: $remote_addr"
@@ -235,12 +250,12 @@ kill_zombie_connections() {
         done <<< "$explicit_zombies"
     fi
 
-    # 2. Second Pass: Detect Multiple Connections from Same IP (Ghost connections)
-    # ----------------------------------------------------------------------------
-    # If a client is connected multiple times, usually only the most recent one is valid.
-    # The others are likely "ghosts" that didn't close properly but haven't timed out yet.
+    # 2. Second Pass: Detect Multiple Connections from Same IP (Cleanup)
+    # ------------------------------------------------------------------
+    # If duplicates persist (e.g. multiple "valid" snapserver connections from same IP),
+    # keep the one with LOWEST Recv-Q (most likely the freshest active stream)
     
-    # Get all established connections: IP, Port, Recv-Q
+    # Get all established connections
     local duplicate_candidates=$(ss -tn state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
             split($5, a, ":");
@@ -250,7 +265,6 @@ kill_zombie_connections() {
             print ip, port, recv_q;
         }' | sort)
     
-    # Identify IPs with multiple connections
     local multi_conn_ips=$(echo "$duplicate_candidates" | awk '{print $1}' | uniq -d)
     
     if [[ -n "$multi_conn_ips" ]]; then
@@ -258,27 +272,21 @@ kill_zombie_connections() {
             [[ -z "$ip" ]] && continue
             
             log_info "Analyzing multiple connections from IP: $ip"
-            
-            # Get all connections for this IP, sorted by Recv-Q ascending
-            # Assumption: The active valid connection usually has LOWEST Recv-Q (being drained properly)
-            # Ghosts often have higher Recv-Q (stuck)
             local conns=$(echo "$duplicate_candidates" | grep "^$ip ")
             
-            # Count connections
+            # Check count again
             local count=$(echo "$conns" | wc -l)
             if [[ $count -le 1 ]]; then continue; fi
             
-            # Strategy: Keep the one with LOWEST Recv-Q. If tied, keep the last one (arbitrary tie-break).
-            # We sort by Recv-Q numeric. The first line is the "best" candidate to KEEP.
+            # Strategy: Keep LOWEST Recv-Q
             local keep_port=$(echo "$conns" | sort -k3,3n | head -n 1 | awk '{print $2}')
             
-            # Kill the others
             while IFS= read -r line; do
                 local c_ip=$(echo "$line" | awk '{print $1}')
                 local c_port=$(echo "$line" | awk '{print $2}')
                 
                 if [[ "$c_port" != "$keep_port" ]]; then
-                    log_warn "Killing duplicate/stale connection: $c_ip:$c_port"
+                    log_warn "Killing duplicate connection: $c_ip:$c_port"
                     if ss -K dst "${c_ip}:${c_port}" 2>/dev/null; then
                         ((killed_count++))
                         log_success "Closed duplicate: $c_ip:$c_port"
@@ -440,36 +448,44 @@ kill_zombie_connections() {
     local port="$1"
     local killed_count=0
     
-    log_msg "Checking for zombie/duplicate connections on port $port (Ingestion Mode)"
+    log_msg "Checking for zombie/orphaned connections on port $port (Ingestion Mode)"
     
-    # 1. First Pass: Detect explicit zombies (timers or high Send/Recv Q)
-    # ------------------------------------------------------------------
-    # Use ss -to to show timer information
-    local explicit_zombies=$(ss -to state established "( sport = :${port} )" 2>/dev/null | \
+    # 1. First Pass: Detect ORPHANED and EXPLICIT DEAD connections
+    # -------------------------------------------------------------
+    # Use ss -top to show timer information AND process information
+    local explicit_zombies=$(ss -top state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
+            # Capture full line for regex checks
+            line = $0;
+            
+            # Extract basic fields
             recv_q = $2;
             send_q = $3;
             peer_addr = $5;
             
-            # Condition A: Stuck Send-Q (any data in purely ingest stream is suspicious)
+            # Condition A: ORPHANED SOCKET (The "Ghost" Detector)
+            # Valid connections have users:(("snapserver"... associated.
+            is_orphan = (line !~ /users:\(\("snapserver"/);
+            
+            # Condition B: Stuck Send-Q
             is_stuck_send = (send_q > 0);
             
-            # Condition B: High Recv-Q (client sent data but app not reading it -> likely dead/stuck)
-            is_stuck_recv = (recv_q > 4096);
-            
             # Condition C: Retransmission timer active
-            is_retrans = ($0 ~ /timer:\(on[[:space:]]*,/ || $0 ~ /timer:\(onack/);
+            is_retrans = (line ~ /timer:\(on[[:space:]]*,/ || line ~ /timer:\(onack/);
             
-            if (is_stuck_send || is_stuck_recv || is_retrans) {
-                print peer_addr
+            if (is_orphan || is_stuck_send || is_retrans) {
+                print peer_addr, (is_orphan ? "ORPHAN" : "DEAD")
             }
         }')
     
     # Kill explicit zombies first
     if [[ -n "$explicit_zombies" ]]; then
-        while IFS= read -r remote_addr; do
-            [[ -z "$remote_addr" ]] && continue
-            log_msg "Found stuck/dead connection: $remote_addr"
+        while IFS= read -r line; do
+            [[ -z "$line" ]] && continue
+            local remote_addr=$(echo "$line" | awk '{print $1}')
+            local reason=$(echo "$line" | awk '{print $2}')
+            
+            log_msg "Found $reason connection: $remote_addr"
             if ss -K dst "$remote_addr" 2>/dev/null; then
                 ((killed_count++))
                 log_msg "Closed zombie: $remote_addr"
@@ -477,12 +493,9 @@ kill_zombie_connections() {
         done <<< "$explicit_zombies"
     fi
 
-    # 2. Second Pass: Detect Multiple Connections from Same IP (Ghost connections)
-    # ----------------------------------------------------------------------------
-    # If a client is connected multiple times, usually only the most recent one is valid.
-    # The others are likely "ghosts" that didn't close properly but haven't timed out yet.
-    
-    # Get all established connections: IP, Port, Recv-Q
+    # 2. Second Pass: Detect Multiple Connections from Same IP (Cleanup)
+    # ------------------------------------------------------------------
+    # Get all established connections
     local duplicate_candidates=$(ss -tn state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
             split($5, a, ":");
@@ -492,7 +505,6 @@ kill_zombie_connections() {
             print ip, port, recv_q;
         }' | sort)
     
-    # Identify IPs with multiple connections
     local multi_conn_ips=$(echo "$duplicate_candidates" | awk '{print $1}' | uniq -d)
     
     if [[ -n "$multi_conn_ips" ]]; then
@@ -500,26 +512,21 @@ kill_zombie_connections() {
             [[ -z "$ip" ]] && continue
             
             log_msg "Analyzing multiple connections from IP: $ip"
-            
-            # Get all connections for this IP, sorted by Recv-Q ascending
-            # Assumption: The active valid connection usually has LOWEST Recv-Q (being drained properly)
-            # Ghosts often have higher Recv-Q (stuck)
             local conns=$(echo "$duplicate_candidates" | grep "^$ip ")
             
-            # Count connections
+            # Check count again
             local count=$(echo "$conns" | wc -l)
             if [[ $count -le 1 ]]; then continue; fi
             
-            # Strategy: Keep the one with LOWEST Recv-Q. If tied, keep the last one (arbitrary tie-break).
+            # Strategy: Keep LOWEST Recv-Q
             local keep_port=$(echo "$conns" | sort -k3,3n | head -n 1 | awk '{print $2}')
             
-            # Kill the others
             while IFS= read -r line; do
                 local c_ip=$(echo "$line" | awk '{print $1}')
                 local c_port=$(echo "$line" | awk '{print $2}')
                 
                 if [[ "$c_port" != "$keep_port" ]]; then
-                    log_msg "Killing duplicate/stale connection: $c_ip:$c_port"
+                    log_msg "Killing duplicate connection: $c_ip:$c_port"
                     if ss -K dst "${c_ip}:${c_port}" 2>/dev/null; then
                         ((killed_count++))
                         log_msg "Closed duplicate: $c_ip:$c_port"
