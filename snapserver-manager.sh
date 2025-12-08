@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.3"
+VERSION="1.5.4"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -225,11 +225,18 @@ kill_zombie_connections() {
         awk 'NR>1 {
             # Capture full line for regex checks
             line = $0;
+
+            # Detect column shift (ss sometimes omits State column when filtering)
+            if ($1 ~ /^[0-9]+$/) {
+               col_recv = 1; col_send = 2; col_peer = 4;
+            } else {
+               col_recv = 2; col_send = 3; col_peer = 5;
+            }
             
             # Extract basic fields
-            recv_q = $2;
-            send_q = $3;
-            peer_addr = $5;
+            recv_q = $col_recv;
+            send_q = $col_send;
+            peer_addr = $col_peer;
             
             # Condition A: ORPHANED SOCKET (The "Ghost" Detector)
             # Valid connections have users:(("snapserver"... associated.
@@ -274,7 +281,8 @@ kill_zombie_connections() {
     # Get all established connections
     local duplicate_candidates=$(ss -tn state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
-            split($5, a, ":");
+            if ($1 ~ /^[0-9]+$/) { col_peer=4; } else { col_peer=5; }
+            split($col_peer, a, ":");
             ip = a[1];
             port = a[2];
             print ip, port;
@@ -466,11 +474,18 @@ kill_zombie_connections() {
         awk 'NR>1 {
             # Capture full line for regex checks
             line = $0;
+
+            # Detect column shift (ss sometimes omits State column when filtering)
+            if ($1 ~ /^[0-9]+$/) {
+               col_recv = 1; col_send = 2; col_peer = 4;
+            } else {
+               col_recv = 2; col_send = 3; col_peer = 5;
+            }
             
             # Extract basic fields
-            recv_q = $2;
-            send_q = $3;
-            peer_addr = $5;
+            recv_q = $col_recv;
+            send_q = $col_send;
+            peer_addr = $col_peer;
             
             # Condition A: ORPHANED SOCKET (The "Ghost" Detector)
             # Valid connections have users:(("snapserver"... associated.
@@ -510,7 +525,8 @@ kill_zombie_connections() {
     # Get all established connections
     local duplicate_candidates=$(ss -tn state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
-            split($5, a, ":");
+            if ($1 ~ /^[0-9]+$/) { col_peer=4; } else { col_peer=5; }
+            split($col_peer, a, ":");
             ip = a[1];
             port = a[2];
             print ip, port;
