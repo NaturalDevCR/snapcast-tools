@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.5"
+VERSION="1.5.6"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -208,15 +208,15 @@ check_zombie_connections() {
 # Kill zombie TCP connections for a specific port (INGESTION MODE)
 # NOTE: This closes only the specific TCP connection (FD), NOT the entire process
 # INGESTION MODE: Laptop sends audio TO Snapserver (server receives, doesn't send)
-# STRATEGY: If ANY connection from an IP is bad, close ALL connections from that IP
+# STRATEGY: If IP has MULTIPLE connections OR any bad connection, close ALL from that IP
 kill_zombie_connections() {
     local port="$1"
     local killed_count=0
     
     log_info "Checking for zombie/orphaned connections on port $port (Ingestion Mode)..."
     
-    # 1. Identify IPs with problematic connections
-    local bad_ips=$(ss -top state established "( sport = :${port} )" 2>/dev/null | \
+    # Get all connections with their IPs and detect issues
+    local conn_data=$(ss -top state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
             line = $0;
             if ($1 ~ /^[0-9]+$/) { col_send = 2; col_peer = 4; }
@@ -230,29 +230,43 @@ kill_zombie_connections() {
             is_orphan = (line !~ /users:\(\("snapserver"/);
             is_stuck_send = (send_q > 0);
             is_retrans = (line ~ /timer:\(on[[:space:]]*,/ || line ~ /timer:\(onack/);
+            is_bad = (is_orphan || is_stuck_send || is_retrans) ? 1 : 0;
             
-            if (is_orphan || is_stuck_send || is_retrans) { print ip }
-        }' | sort -u)
+            print ip, peer_addr, is_bad
+        }')
     
-    if [[ -z "$bad_ips" ]]; then
-        log_info "No zombie or orphaned connections found on port $port"
+    if [[ -z "$conn_data" ]]; then
+        log_info "No connections found on port $port"
         return 0
     fi
     
-    # 2. For each bad IP, close ALL connections from that IP
+    # Find IPs to clean: those with multiple connections OR any bad connection
+    local ips_to_clean=$(echo "$conn_data" | awk '{
+        ip = $1;
+        is_bad = $3;
+        conn_count[ip]++;
+        if (is_bad == 1) bad_ip[ip] = 1;
+    }
+    END {
+        for (ip in conn_count) {
+            if (conn_count[ip] > 1 || bad_ip[ip] == 1) print ip
+        }
+    }')
+    
+    if [[ -z "$ips_to_clean" ]]; then
+        log_info "No zombie or duplicate connections found on port $port"
+        return 0
+    fi
+    
+    # Close ALL connections from each problematic IP
     while IFS= read -r bad_ip; do
         [[ -z "$bad_ip" ]] && continue
         
-        log_warn "Bad connection detected from IP: $bad_ip"
+        local count=$(echo "$conn_data" | awk -v ip="$bad_ip" '$1 == ip' | wc -l)
+        log_warn "Problematic IP: $bad_ip ($count connection(s))"
         log_info "Closing ALL connections from $bad_ip to force clean reconnection..."
         
-        local all_conns=$(ss -tn state established "( sport = :${port} )" 2>/dev/null | \
-            awk -v target_ip="$bad_ip" 'NR>1 {
-                if ($1 ~ /^[0-9]+$/) { col_peer=4; } else { col_peer=5; }
-                peer = $col_peer;
-                split(peer, parts, ":");
-                if (parts[1] == target_ip) { print peer }
-            }')
+        local conns=$(echo "$conn_data" | awk -v ip="$bad_ip" '$1 == ip { print $2 }')
         
         while IFS= read -r conn; do
             [[ -z "$conn" ]] && continue
@@ -261,9 +275,9 @@ kill_zombie_connections() {
                 ((killed_count++))
                 log_success "Closed: $conn"
             fi
-        done <<< "$all_conns"
+        done <<< "$conns"
         
-    done <<< "$bad_ips"
+    done <<< "$ips_to_clean"
     
     if [[ $killed_count -gt 0 ]]; then
         log_success "Total connections closed on port $port: $killed_count"
@@ -416,8 +430,8 @@ kill_zombie_connections() {
     
     log_msg "Checking port $port for zombie connections"
     
-    # 1. Identify IPs with problematic connections
-    local bad_ips=$(ss -top state established "( sport = :${port} )" 2>/dev/null | \
+    # Get all connections with their IPs and detect issues
+    local conn_data=$(ss -top state established "( sport = :${port} )" 2>/dev/null | \
         awk 'NR>1 {
             line = $0;
             if ($1 ~ /^[0-9]+$/) { col_send = 2; col_peer = 4; }
@@ -431,37 +445,41 @@ kill_zombie_connections() {
             is_orphan = (line !~ /users:\(\("snapserver"/);
             is_stuck_send = (send_q > 0);
             is_retrans = (line ~ /timer:\(on[[:space:]]*,/ || line ~ /timer:\(onack/);
+            is_bad = (is_orphan || is_stuck_send || is_retrans) ? 1 : 0;
             
-            if (is_orphan || is_stuck_send || is_retrans) { print ip }
-        }' | sort -u)
+            print ip, peer_addr, is_bad
+        }')
     
-    if [[ -z "$bad_ips" ]]; then
-        return 0
-    fi
+    [[ -z "$conn_data" ]] && return 0
     
-    # 2. For each bad IP, close ALL connections from that IP
+    # Find IPs to clean: multiple connections OR any bad connection
+    local ips_to_clean=$(echo "$conn_data" | awk '{
+        ip = $1; is_bad = $3;
+        conn_count[ip]++;
+        if (is_bad == 1) bad_ip[ip] = 1;
+    }
+    END {
+        for (ip in conn_count) {
+            if (conn_count[ip] > 1 || bad_ip[ip] == 1) print ip
+        }
+    }')
+    
+    [[ -z "$ips_to_clean" ]] && return 0
+    
+    # Close ALL connections from each problematic IP
     while IFS= read -r bad_ip; do
         [[ -z "$bad_ip" ]] && continue
+        log_msg "Problematic IP: $bad_ip - closing ALL connections"
         
-        log_msg "Bad connection from $bad_ip - closing ALL connections from this IP"
-        
-        local all_conns=$(ss -tn state established "( sport = :${port} )" 2>/dev/null | \
-            awk -v target_ip="$bad_ip" 'NR>1 {
-                if ($1 ~ /^[0-9]+$/) { col_peer=4; } else { col_peer=5; }
-                peer = $col_peer;
-                split(peer, parts, ":");
-                if (parts[1] == target_ip) { print peer }
-            }')
-        
+        local conns=$(echo "$conn_data" | awk -v ip="$bad_ip" '$1 == ip { print $2 }')
         while IFS= read -r conn; do
             [[ -z "$conn" ]] && continue
             if ss -K dst "$conn" 2>/dev/null; then
                 ((killed_count++))
                 log_msg "Closed: $conn"
             fi
-        done <<< "$all_conns"
-        
-    done <<< "$bad_ips"
+        done <<< "$conns"
+    done <<< "$ips_to_clean"
     
     [[ $killed_count -gt 0 ]] && log_msg "Closed $killed_count connection(s) on port $port"
 }
