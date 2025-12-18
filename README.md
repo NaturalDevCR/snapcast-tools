@@ -1,79 +1,94 @@
-# snapcast-tools
+# Snapcast Tools 🎧
 
-Scripts to manage and make things easier with snapcast
-
-## snapserver-manager.sh (Simple & Quick)
-
-A lightweight manager for Snapserver with TCP Watchdog support.
-
-Run directly on Debian/Ubuntu:
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snapserver-manager.sh)"
-```
-
-Alternative:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snapserver-manager.sh | bash
-```
-
-**Features:**
-
-- Install/Update Snapserver
-- Service Management
-- View Logs
-- Manage TCP Sources
-- **TCP Watchdog** - Monitors and kills zombie TCP connections automatically
+A collection of powerful bash scripts to manage **Snapcast Server** (Multi-room Audio) and **Snapclient** instances. These tools simplify installation, stream management, watchdog services, and client configuration, with special support for **Proxmox LXC** environments.
 
 ---
 
-## snap-server-manager.sh (Advanced):
+## 🛠️ Included Tools
 
-Run directly on Debian:
+| Script                  | Role       | Description                                                                  |
+| :---------------------- | :--------- | :--------------------------------------------------------------------------- |
+| `snapserver-manager.sh` | **SERVER** | Manage streams (TCP/Process), Watchdogs, Backups, and Snapserver config.     |
+| `snapclient-setup.sh`   | **CLIENT** | Install Snapclient, fix ALSA card order, diagnostics, and Proxmox LXC setup. |
 
-```
-curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snap-server-manager.sh | bash
-```
+---
 
-Alternative:
+## 🖥️ 1. Snapstream Manager (Server)
 
-```
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snap-server-manager.sh)"
-```
+`snapserver-manager.sh` is an all-in-one control panel for your Snapserver instance.
 
-Note: Do not wrap the URL in backticks; use plain quotes or pipe to bash.
+### ✨ Key Features
 
-### Config generation changes
+- **Easy Installation**: Deploys Snapserver, FFmpeg, and dependencies automatically.
+- **Stream Management**:
+  - **TCP Sources**: Easily add inputs from Windows/Linux PCs (via `tcp://`).
+  - **Process Sources**: Add HLS/Web streams (e.g., **Azuracast**) or custom FFmpeg inputs (via `process://`).
+  - **Smart Insertion**: Automatically configures `snapserver.conf` correctly.
+- **Stability Watchdogs**:
+  - **TCP Watchdog**: Enforces a strict limit of **1 connection per port**. If multiple connections/IPs clash, it kills all to force a clean reconnection.
+  - **FFmpeg Watchdog**: Monitors pipe streams for freezes or silence and restarts them automatically.
+- **Log Viewer**: Check logs for Snapserver, individual streams, and watchdogs.
+- **Backups**: Create and restore tarball backups of your entire configuration.
 
-- Adds a global `process:///usr/bin/ffmpeg` Silence source inside `[stream]` with `codec=null` to be invisible to users.
-- Creates individual pipe sources for known FIFOs with `codec=null` and `sampleformat=48000:16:2`.
-- Adds MetaStreams that reference the Silence fallback with `codec=pcm`, matching Snapserver best practices.
+### 🚀 Usage
 
-Example entries added to `/etc/snapserver.conf`:
+Run as root:
 
-```
-[stream]
-source = process:///usr/bin/ffmpeg?name=Silence&codec=null&sampleformat=48000:16:2&params=-f lavfi -i anullsrc=r=48000:cl=stereo -f s16le -ar 48000 -ac 2 -
-source = pipe:///var/lib/snapserver/fifo/snapfifo_frontdesk?name=PC-FrontDesk&codec=null&sampleformat=48000:16:2
-source = pipe:///var/lib/snapserver/fifo/snapfifo_aracari?name=PC-Aracari&codec=null&sampleformat=48000:16:2
-source = pipe:///var/lib/snapserver/fifo/snapfifo_azuracastrestaurants?name=Azuracast-Restaurants&codec=null&sampleformat=48000:16:2
-source = pipe:///var/lib/snapserver/fifo/snapfifo_azuracastfrontdesk?name=Azuracast-FrontDesk&codec=null&sampleformat=48000:16:2
-source = pipe:///var/lib/snapserver/fifo/snapfifo_azuracastoutdoors?name=Azuracast-Outdoors&codec=null&sampleformat=48000:16:2
-source = pipe:///var/lib/snapserver/fifo/snapfifo_pcpool?name=PC-Pool&codec=null&sampleformat=48000:16:2
-
-source = meta:///PC-FrontDesk/Silence?name=FrontDesk&codec=pcm&sampleformat=48000:16:2
-source = meta:///PC-Aracari/Silence?name=Aracari&codec=pcm&sampleformat=48000:16:2
-source = meta:///Azuracast-Restaurants/Silence?name=Restaurants&codec=pcm&sampleformat=48000:16:2
-source = meta:///Azuracast-FrontDesk/Silence?name=AzuraFrontDesk&codec=pcm&sampleformat=48000:16:2
-source = meta:///Azuracast-Outdoors/Silence?name=Outdoors&codec=pcm&sampleformat=48000:16:2
-source = meta:///PC-Pool/Silence?name=Pool&codec=pcm&sampleformat=48000:16:2
+```bash
+sudo ./snapserver-manager.sh
 ```
 
-This ensures all user-facing streams have a stable Silence fallback using MetaStreams.
+### 📋 Menu Options
 
-## snapclient-setup.sh:
+- **1-3**: Add/Edit/Delete streams.
+- **4 (Manage Sources)**: Add specific sources like **TCP** (for Spotify/PC audio) or **Process** (for Web Radio/Azuracast).
+  - _Now supports configurable parameters (Idle Threshold, Timeout, Retry) during creation._
+- **5 (TCP Watchdog)**: Essential for robustness. Kills zombie connections.
+- **6 (Services)**: Restart Snapserver or specific stream services.
+- **B (Backups)**: Save your work!
 
+---
+
+## 🔈 2. Snapclient Setup (Client)
+
+`snapclient-setup.sh` simplifies the complex task of configuring audio clients, especially in **Proxmox LXC containers**.
+
+### ✨ Key Features
+
+- **Proxmox Support**: Automatically configures audio passthrough (`/dev/snd`) for LXC containers.
+- **ALSA Fixer**: Corrects the dreaded "Audio Card vs USB Card" order issues on host reboots.
+- **Diagnostics**: Generates a detailed health report of ALSA cards, modules, and logs.
+- **Volume Control**: Sets initial volume persistence.
+
+### 🚀 Usage
+
+Run as root (can be run on the Proxmox Host or inside a Container/VM):
+
+```bash
+sudo ./snapclient-setup.sh
 ```
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/refs/heads/main/snapclient-setup.sh)"
-```
+
+### 📋 Workflow
+
+1.  **Check Prerequisites**: Verifies ALSA modules and packages.
+2.  **Fix Host ALSA Order** (Run on Host): ensures your DAC is always `card1` (or whichever you prefer).
+3.  **Configure Snapclient**:
+    - Selects the correct ALSA device.
+    - Installs the correct `.deb` for your Debian version.
+    - Connects to your Snapserver IP.
+
+---
+
+## 📦 Requirements
+
+- **OS**: Debian 11/12, Ubuntu 20.04+, or Proxmox LXC (Debian-based).
+- **Privileges**: Must run as `root`.
+- **Dependencies**: `ffmpeg`, `curl`, `jq`, `alsa-utils` (installed automatically).
+
+## 🤝 Contribution
+
+Feel free to open issues or PRs to improve loop detection or add new stream types!
+
+---
+
+_Maintained by NaturalDevCR_

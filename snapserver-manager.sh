@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.7"
+VERSION="1.5.8"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -48,7 +48,7 @@ check_root() {
 
 # Check for required dependencies
 check_dependencies() {
-    local dependencies=("curl" "wget" "jq" "systemctl" "grep" "sed" "lsof" "netstat")
+    local dependencies=("curl" "wget" "jq" "systemctl" "grep" "sed" "lsof" "netstat" "awk")
     local missing=()
 
     for cmd in "${dependencies[@]}"; do
@@ -56,6 +56,7 @@ check_dependencies() {
             missing+=("$cmd")
         fi
     done
+
 
     if [[ ${#missing[@]} -gt 0 ]]; then
         log_warn "Missing dependencies: ${missing[*]}"
@@ -620,26 +621,90 @@ manage_tcp_watchdog() {
     done
 }
 
-# --- TCP Source Management ---
+# --- TCP/Process Source Management ---
+
+# Helper to insert source lines into the [stream] block
+# Inserts BEFORE the next section ([...]) or at the end of the file if no next section
+insert_into_stream_block() {
+    local comment="$1"
+    local source_line="$2"
+    local config="$3"
+
+    # Ensure [stream] section exists
+    if ! grep -q "^\[stream\]" "$config"; then
+        echo "" >> "$config"
+        echo "[stream]" >> "$config"
+        echo "codec = pcm" >> "$config"
+    fi
+
+    # Create a temporary file with the new content to insert
+    local insert_content="${comment}\n${source_line}"
+
+    # Use awk to insert nicely
+    awk -v insert="$insert_content" '
+        BEGIN { inserted=0; inside_stream=0 }
+        /^\[stream\]/ { 
+            print; 
+            inside_stream=1; 
+            next 
+        }
+        /^\[/ { 
+            if (inside_stream && !inserted) {
+                print ""
+                print insert
+                print ""
+                inserted=1
+                inside_stream=0
+            }
+        }
+        { print }
+        END { 
+            if (!inserted) {
+                print ""
+                print insert
+            }
+        }
+    ' "$config" > "${config}.tmp" && mv "${config}.tmp" "$config"
+}
+
+# URL Encode helper (simple version for basic URL components)
+url_encode() {
+    local string="$1"
+    local strlen=${#string}
+    local encoded=""
+    local pos c o
+
+    for (( pos=0 ; pos<strlen ; pos++ )); do
+        c=${string:$pos:1}
+        case "$c" in
+            [-_.~a-zA-Z0-9] ) o="${c}" ;;
+            * )               printf -v o '%%%02x' "'$c"
+        esac
+        encoded+="${o}"
+    done
+    echo "${encoded}"
+}
 
 manage_sources() {
     while true; do
         clear
-        echo -e "${CYAN}--- TCP Source Management ---${NC}"
-        echo -e "Current TCP Sources in $CONFIG_FILE:"
+        echo -e "${CYAN}--- Source Management ---${NC}"
+        echo -e "Current Sources in $CONFIG_FILE:"
         echo -e "${YELLOW}"
-        # Display sources with their comments if possible, or just the config lines
-        grep "source = tcp://" "$CONFIG_FILE" || echo "No TCP sources found."
+        # Display sources with their comments (grep context -B1 for comments)
+        grep -nE "source = (tcp|process)://" "$CONFIG_FILE" || echo "No custom sources found."
         echo -e "${NC}"
         echo -e "${CYAN}-----------------------------${NC}"
-        echo "1. Add TCP Source"
-        echo "2. Remove TCP Source"
-        echo "3. Back to Main Menu"
+        echo "1. Add TCP Source (Laptop/PC)"
+        echo "2. Add Process Source (Azuracast/HLS)"
+        echo "3. Remove Source"
+        echo "4. Back to Main Menu"
         echo -e "${CYAN}-----------------------------${NC}"
         read -p "Select an option: " choice
         
         case $choice in
             1)
+                echo -e "${BOLD}Add TCP Source${NC}"
                 read -p "Enter Port (default 4953): " port
                 port=${port:-4953}
                 read -p "Enter Name (e.g., Spotify): " name
@@ -648,32 +713,30 @@ manage_sources() {
                 codec=${codec:-pcm}
                 read -p "Enter Sample Format (default 48000:16:2): " sampleformat
                 sampleformat=${sampleformat:-48000:16:2}
+
+                # Optional Advanced Configs
+                read -p "Idle Threshold (ms, default 2000): " idle_threshold
+                idle_threshold=${idle_threshold:-2000}
                 
-                # Sanitize name (remove spaces)
+                read -p "Send Silence? (true/false, default true): " send_silence
+                send_silence=${send_silence:-true}
+                
+                read -p "Retry Count (default 3): " retry
+                retry=${retry:-3}
+                
+                read -p "Timeout (sec, default 5): " timeout
+                timeout=${timeout:-5}
+                
+                # Sanitize name
                 safe_name=$(echo "$name" | tr -d ' ')
 
-                # Construct the comment and source line
                 COMMENT_LINE="# ${name} TCP"
-                SOURCE_LINE="source = tcp://0.0.0.0:${port}?name=${safe_name}&codec=${codec}&sampleformat=${sampleformat}&idle_threshold=2000&send_silence=true&retry=3&timeout=5"
+                SOURCE_LINE="source = tcp://0.0.0.0:${port}?name=${safe_name}&codec=${codec}&sampleformat=${sampleformat}&idle_threshold=${idle_threshold}&send_silence=${send_silence}&retry=${retry}&timeout=${timeout}"
                 
-                # Check if [stream] section exists
-                if ! grep -q "^\[stream\]" "$CONFIG_FILE"; then
-                    echo "" >> "$CONFIG_FILE"
-                    echo "[stream]" >> "$CONFIG_FILE"
-                    echo "codec = pcm" >> "$CONFIG_FILE"
-                fi
+                insert_into_stream_block "$COMMENT_LINE" "$SOURCE_LINE" "$CONFIG_FILE"
                 
-                # Update global codec if [stream] exists but codec is not set (optional enhancement, but safer to respect existing)
-                # For now, just append the source implementation
+                log_success "Added TCP source: $name on port $port"
                 
-                # Append to file
-                echo "" >> "$CONFIG_FILE"
-                echo "$COMMENT_LINE" >> "$CONFIG_FILE"
-                echo "$SOURCE_LINE" >> "$CONFIG_FILE"
-                
-                log_success "Added source: $name on port $port ($codec, $sampleformat)"
-                
-                # Optional: Restart service
                 read -p "Restart Snapserver now? (y/N): " restart_opt
                 if [[ "$restart_opt" =~ ^[Yy]$ ]]; then
                     systemctl restart "$SERVICE_NAME"
@@ -682,9 +745,58 @@ manage_sources() {
                 read -p "Press Enter to continue..."
                 ;;
             2)
+                echo -e "${BOLD}Add Process Source (Web Stream/HLS)${NC}"
+                echo "Example URL: https://cast.symphonycr.com/hls/test/live.m3u8"
+                read -p "Enter Stream URL: " stream_url
+                
+                if [[ -z "$stream_url" ]]; then
+                    log_error "URL is required."
+                    read -p "Press Enter to continue..."
+                    continue
+                fi
+
+                read -p "Enter Name (e.g., Radio-Gym): " name
+                name=${name:-Web_Stream}
+                
+                # Sanitize name
+                safe_name=$(echo "$name" | tr -d ' ')
+
+                # URL Encode the stream URL for inclusion in params
+                # Note: user example uses %20 for spaces, but here we escape the URL itself
+                # We simply put the URL as is if it doesn't have spaces, but encoded is safer
+                # However, the user example shows explicit params string construction.
+                # params=-i https://... -f s16le...
+                # We need to ensure spaces in the params are encoded as %20
+                
+                RAW_PARAMS="-i ${stream_url} -f s16le -ar 48000 -ac 2 -"
+                # Helper to encode spaces to %20
+                ENCODED_PARAMS=$(echo "$RAW_PARAMS" | sed 's/ /%20/g')
+
+                # Optional Advanced Configs
+                read -p "Idle Threshold (ms, default 5000): " idle_threshold
+                idle_threshold=${idle_threshold:-5000}
+                
+                read -p "Send Silence? (true/false, default true): " send_silence
+                send_silence=${send_silence:-true}
+
+                COMMENT_LINE="# ${name}"
+                SOURCE_LINE="source = process:///usr/bin/ffmpeg?name=${safe_name}&codec=pcm&sampleformat=48000:16:2&idle_threshold=${idle_threshold}&send_silence=${send_silence}&log_stderr=false&params=${ENCODED_PARAMS}"
+                
+                insert_into_stream_block "$COMMENT_LINE" "$SOURCE_LINE" "$CONFIG_FILE"
+                
+                log_success "Added Process source: $name"
+                
+                read -p "Restart Snapserver now? (y/N): " restart_opt
+                if [[ "$restart_opt" =~ ^[Yy]$ ]]; then
+                    systemctl restart "$SERVICE_NAME"
+                    log_success "Service restarted."
+                fi
+                read -p "Press Enter to continue..."
+                ;;
+            3)
                 echo -e "${YELLOW}Select a source to delete:${NC}"
-                # Get lines with line numbers
-                grep -n "source = tcp://" "$CONFIG_FILE"
+                # Get lines with line numbers for both tcp and process
+                grep -nE "source = (tcp|process)://" "$CONFIG_FILE"
                 
                 if [[ $? -ne 0 ]]; then
                      echo "No sources to delete."
@@ -696,10 +808,7 @@ manage_sources() {
                 
                 if [[ -n "$line_num" && "$line_num" =~ ^[0-9]+$ ]]; then
                     # Check if the previous line is a comment associated with this source
-                    # We look at line_num - 1
                     prev_line_num=$((line_num - 1))
-                    
-                    # Read the content of the previous line
                     prev_line_content=$(sed "${prev_line_num}q;d" "$CONFIG_FILE")
                     
                     # Delete the source line
@@ -707,8 +816,9 @@ manage_sources() {
                     rm "${CONFIG_FILE}.bak"
                     log_success "Removed source line."
 
-                    # Check if previous line looks like our generated comment (starts with # and contains TCP)
-                    if [[ "$prev_line_content" =~ ^#.*TCP.*$ ]]; then
+                    # Check if previous line looks like a comment (starts with #)
+                    # We are slightly aggressive here, assuming any # above a source we just deleted is ours
+                    if [[ "$prev_line_content" =~ ^#.*$ ]]; then
                         sed -i.bak "${prev_line_num}d" "$CONFIG_FILE"
                         rm "${CONFIG_FILE}.bak"
                         log_success "Removed associated comment."
@@ -724,7 +834,7 @@ manage_sources() {
                 fi
                 read -p "Press Enter to continue..."
                 ;;
-            3) return ;;
+            4) return ;;
             *) log_error "Invalid option." ;;
         esac
     done
@@ -749,7 +859,7 @@ show_menu() {
         echo "1. Install/Update Snapserver"
         echo "2. Service Management"
         echo "3. View Logs"
-        echo "4. Manage TCP Sources"
+        echo "4. Manage Sources (TCP/Process)"
         echo "5. TCP Watchdog (Monitor & Kill Zombies)"
         echo "6. Exit"
         echo -e "${CYAN}--------------------------------------------------${NC}"
