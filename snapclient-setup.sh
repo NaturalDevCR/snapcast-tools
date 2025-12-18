@@ -235,6 +235,93 @@ fix_alsa_order() {
 
 # === INSTALLATION LOGIC =====================================================
 
+select_audio_device() {
+  echo ""
+  aplay -l | grep '^card' || { echo "❌ No ALSA cards detected on this system."; exit 1; }
+  echo ""
+  read -rp "Enter the card number to use (e.g., 0=Internal, 1=DAC): " CARD_ID
+  
+  mapfile -t DEVICE_NUMS < <(aplay -l 2>/dev/null | awk -v id="$CARD_ID" '/^card/ && $2==id":" {print $6}' | sed 's/,//')
+  if [ ${#DEVICE_NUMS[@]} -eq 0 ]; then
+    echo "❌ No ALSA devices detected for card $CARD_ID."
+    exit 1
+  fi
+  
+  read -rp "Select the device number [default: ${DEVICE_NUMS[0]}]: " DEV_ID
+  [[ -z "$DEV_ID" ]] && DEV_ID="${DEVICE_NUMS[0]}"
+  
+  if [ -f "/proc/asound/card${CARD_ID}/id" ]; then
+    CARD_NAME=$(cat "/proc/asound/card${CARD_ID}/id")
+  else
+    CARD_NAME=$(aplay -l 2>/dev/null | awk -v id="$CARD_ID" -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
+  fi
+  
+  SAFE_CARD_NAME=$(echo "$CARD_NAME" | tr -d ' ')
+  ALSA_DEVICE="plughw:CARD=$SAFE_CARD_NAME,DEV=$DEV_ID"
+  
+  export CARD_ID CARD_NAME ALSA_DEVICE
+  echo ""
+  echo "✅ Card detected successfully:"
+  echo "   CARD_NAME = $CARD_NAME"
+  echo "   ALSA_DEVICE = $ALSA_DEVICE"
+  echo ""
+}
+
+_perform_local_update() {
+  set -Eeuo pipefail
+  echo ""
+  echo "🔧 Update Menu:"
+  echo "1️⃣  Update Snapserver IP"
+  echo "2️⃣  Update Audio Device"
+  echo "3️⃣  Cancel"
+  read -rp "Select an option: " U_OPT
+  
+  local CFG="/etc/default/snapclient"
+  if [ ! -f "$CFG" ]; then
+    echo "❌ Config file $CFG not found. Is snapclient installed?"
+    return 1
+  fi
+  
+  case "$U_OPT" in
+    1)
+      read -rp "Enter new Snapserver IP: " NEW_IP
+      if grep -q "\--host" "$CFG"; then
+        sed -i "s/--host [^ \"]*/--host $NEW_IP/" "$CFG"
+      else
+        sed -i "s/\"$/ --host $NEW_IP\"/" "$CFG"
+      fi
+      echo "✅ IP updated to $NEW_IP."
+      ;;
+    2)
+      select_audio_device
+      # Update asound.conf
+      mkdir -p /etc
+      cat > /etc/asound.conf <<EOF
+defaults.pcm.card ${CARD_ID}
+defaults.ctl.card ${CARD_ID}
+EOF
+      echo "✅ /etc/asound.conf updated."
+      # Update SNAPCLIENT_OPTS
+      if grep -q "\--soundcard" "$CFG"; then
+        sed -i "s|--soundcard [^ \"]*|--soundcard $ALSA_DEVICE|" "$CFG"
+      else
+        sed -i "s|\"$| --soundcard $ALSA_DEVICE\"/" "$CFG"
+      fi
+      echo "✅ Audio device updated."
+      ;;
+    *)
+      echo "Update canceled."
+      return 0
+      ;;
+  esac
+  
+  echo "🔄 Restarting snapclient..."
+  systemctl restart snapclient
+  systemctl -l --no-pager status snapclient | head -n 10
+  echo ""
+  pause
+}
+
 _install_and_configure_snapclient() {
   set -Eeuo pipefail
   
@@ -360,28 +447,9 @@ setup_snapclient() {
   echo "💡 Recommended Snapclient version: $SUGGESTED_VER"
   echo "🔍 Currently installed version: $INSTALLED_VER"
   echo ""
-  aplay -l | grep '^card' || { echo "❌ No ALSA cards detected on this system."; exit 1; }
-  echo ""
-  read -rp "Enter the card number to use (e.g., 0=Internal, 1=DAC): " CARD_ID
-  mapfile -t DEVICE_NUMS < <(aplay -l 2>/dev/null | awk -v id=$CARD_ID '/^card/ && $2==id":" {print $6}' | sed 's/,//')
-  if [ ${#DEVICE_NUMS[@]} -eq 0 ]; then
-    echo "❌ No ALSA devices detected for card $CARD_ID."
-    exit 1
-  fi
-  read -rp "Select the device number [default: ${DEVICE_NUMS[0]}]: " DEV_ID
-  [[ -z "$DEV_ID" ]] && DEV_ID="${DEVICE_NUMS[0]}"
-  if [ -f "/proc/asound/card${CARD_ID}/id" ]; then
-    CARD_NAME=$(cat "/proc/asound/card${CARD_ID}/id")
-  else
-    CARD_NAME=$(aplay -l 2>/dev/null | awk -v id="$CARD_ID" -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
-  fi
-  SAFE_CARD_NAME=$(echo "$CARD_NAME" | tr -d ' ')
-  ALSA_DEVICE="plughw:CARD=$SAFE_CARD_NAME,DEV=$DEV_ID"
-  echo ""
-  echo "✅ Card detected successfully:"
-  echo "   CARD_NAME = $CARD_NAME"
-  echo "   ALSA_DEVICE = $ALSA_DEVICE"
-  echo ""
+  
+  select_audio_device
+
   read -rp "Enter the Snapserver IP: " SNAPSERVER_IP
   local DEFAULT_CLIENT_NAME
   if [ "$ENVIRONMENT" = "proxmox" ]; then
@@ -430,6 +498,30 @@ EOF
     _install_and_configure_snapclient "$SUGGESTED_VER" "$DEBIAN_VERSION" "$CARD_ID" "$ALSA_DEVICE" "$CLIENT_NAME" "$SNAPSERVER_IP" "$VOLUME"
   fi
   verify_snapclient "$ENVIRONMENT" "${CTID:-}"
+}
+
+update_existing_snapclient() {
+  local ENVIRONMENT
+  ENVIRONMENT=$(detect_environment)
+  echo ""
+  echo "🔄 Update Existing Snapclient Configuration"
+  
+  if [ "$ENVIRONMENT" = "proxmox" ]; then
+    echo ""
+    echo "📦 Available containers:"
+    pct list | awk 'NR>1 {printf " - %s (%s)\n", $1, $2}'
+    echo ""
+    read -rp "Enter the LXC container ID to update: " CTID
+    if ! pct status "$CTID" >/dev/null 2>&1; then
+      echo "❌ Container $CTID does not exist."
+      return
+    fi
+    echo "🚀 Entering container $CTID to perform update..."
+    # We pass the functions needed to run inside
+    pct exec "$CTID" -- bash -c "$(declare -f pause); $(declare -f select_audio_device); $(declare -f _perform_local_update); _perform_local_update"
+  else
+    _perform_local_update
+  fi
 }
 
 # === VERIFICATION AND MENU ===================================================
@@ -486,19 +578,21 @@ main() {
     echo "3️⃣  Configure new Snapclient (LXC/Debian)"
     echo "4️⃣  Run all steps (1, 2, 3)"
     echo "---"
-    echo "5️⃣  🔎 Verify existing Snapclient"
-    echo "6️⃣  🧾 Generate diagnostics report"
-    echo "7️⃣  🚪 Exit"
+    echo "5️⃣  🔄 Update existing Snapclient config (IP/Audio)"
+    echo "6️⃣  🔎 Verify existing Snapclient"
+    echo "7️⃣  🧾 Generate diagnostics report"
+    echo "8️⃣  🚪 Exit"
     echo "═══════════════════════════════════════════════════"
-    read -rp "Select an option [1-7]: " opt
+    read -rp "Select an option [1-8]: " opt
     case "$opt" in
       1) check_prerequisites ;;
       2) check_prerequisites; fix_alsa_order ;;
       3) check_prerequisites; setup_snapclient ;;
       4) check_prerequisites; fix_alsa_order; setup_snapclient ;;
-      5) verify_existing_snapclient ;;
-      6) generate_diagnostics ;;
-      7) echo "👋 Exiting…"; exit 0 ;;
+      5) update_existing_snapclient ;;
+      6) verify_existing_snapclient ;;
+      7) generate_diagnostics ;;
+      8) echo "👋 Exiting…"; exit 0 ;;
       *) echo "❌ Invalid option."; sleep 1 ;;
     esac
   done
