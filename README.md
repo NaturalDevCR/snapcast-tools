@@ -38,6 +38,12 @@ Run as root:
 sudo ./snapserver-manager.sh
 ```
 
+**Or run directly via remote script:**
+
+```bash
+bash <(curl -s https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/main/snapserver-manager.sh)
+```
+
 ### 📋 Menu Options
 
 - **1-3**: Add/Edit/Delete streams.
@@ -66,6 +72,12 @@ Run as root (can be run on the Proxmox Host or inside a Container/VM):
 
 ```bash
 sudo ./snapclient-setup.sh
+```
+
+**Or run directly via remote script:**
+
+```bash
+bash <(curl -s https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/main/snapclient-setup.sh)
 ```
 
 ### 📋 Workflow
