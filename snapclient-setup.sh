@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.7 (Functions Restored)
+# setup-snapclient.sh - v3.8 (Chrony + LXC Fixes)
 # Restores accidentally deleted functions `fix_alsa_order` and
 # `generate_diagnostics` for full menu functionality.
 #
@@ -273,7 +273,8 @@ _perform_local_update() {
   echo "🔧 Update Menu:"
   echo "1️⃣  Update Snapserver IP"
   echo "2️⃣  Update Audio Device"
-  echo "3️⃣  Cancel"
+  echo "3️⃣  Install/Fix System Dependencies (Chrony)"
+  echo "4️⃣  Cancel"
   read -rp "Select an option: " U_OPT
   
   local CFG="/etc/default/snapclient"
@@ -309,6 +310,13 @@ EOF
       fi
       echo "✅ Audio device updated."
       ;;
+    3)
+      echo "📦 Installing Chrony for time synchronization..."
+      apt-get update -qq && apt-get install -y chrony
+      systemctl enable --now chrony
+      systemctl status chrony --no-pager
+      echo "✅ Chrony installed and running."
+      ;;
     *)
       echo "Update canceled."
       return 0
@@ -334,7 +342,11 @@ _install_and_configure_snapclient() {
   local VOLUME="$7"
 
   echo "📦 Installing prerequisites..."
-  apt-get update -qq && apt-get install -yq alsa-utils psmisc ffmpeg wget
+  apt-get update -qq && apt-get install -yq alsa-utils psmisc ffmpeg wget chrony
+  
+  echo "🕒 Configuring Chrony..."
+  systemctl enable --now chrony
+  systemctl status chrony --no-pager || echo "⚠️ Chrony status check failed (it might be running though)."
 
   cd /tmp
 
@@ -486,6 +498,8 @@ setup_snapclient() {
 # === ALSA Passthrough (added by setup-snapclient.sh) ===
 lxc.cgroup2.devices.allow: c 116:* rwm
 lxc.mount.entry: /dev/snd dev/snd none bind,optional,create=dir
+lxc.apparmor.profile: unconfined
+lxc.cap.drop: 
 EOF
       echo "🔄 Rebooting container to apply passthrough..."
       pct reboot "$CTID"
@@ -517,6 +531,27 @@ update_existing_snapclient() {
       return
     fi
     echo "🚀 Entering container $CTID to perform update..."
+    
+    # Check if we need to update LXC config on host first
+    read -rp "🛠️  Do you want to update LXC config (AppArmor/Caps) for time sync? (Y/n): " UP_LXC
+    if [[ ! "$UP_LXC" =~ ^[Nn]$ ]]; then
+       local CONF_FILE="/etc/pve/lxc/${CTID}.conf"
+       if ! grep -q "lxc.apparmor.profile: unconfined" "$CONF_FILE"; then
+         echo "⚙️  Adding unconfined profile and dropping caps to $CTID..."
+         cat <<EOF >> "$CONF_FILE"
+
+# === Time Sync & Privileges (added by setup-snapclient.sh) ===
+lxc.apparmor.profile: unconfined
+lxc.cap.drop: 
+EOF
+         echo "🔄 Rebooting container to apply privileges..."
+         pct reboot "$CTID"
+         sleep 8
+       else
+         echo "✅ LXC config seems already updated."
+       fi
+    fi
+
     # We pass the functions needed to run inside
     pct exec "$CTID" -- bash -c "$(declare -f pause); $(declare -f select_audio_device); $(declare -f _perform_local_update); _perform_local_update"
   else
@@ -571,7 +606,7 @@ main() {
   while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.7"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.8"
     echo "═══════════════════════════════════════════════════"
     echo "1️⃣  Check prerequisites & ALSA modules (Host)"
     echo "2️⃣  Fix host ALSA card order"
