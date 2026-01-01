@@ -41,7 +41,7 @@ sudo ./snapserver-manager.sh
 **Or run directly via remote script:**
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/main/snapserver-manager.sh)
+curl -s https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/main/snapserver-manager.sh | sudo bash
 ```
 
 ### 📋 Menu Options
@@ -77,7 +77,7 @@ sudo ./snapclient-setup.sh
 **Or run directly via remote script:**
 
 ```bash
-bash <(curl -s https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/main/snapclient-setup.sh)
+curl -s https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/main/snapclient-setup.sh | sudo bash
 ```
 
 ### 📋 Workflow

@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.8"
+VERSION="1.5.9"
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
@@ -109,17 +109,33 @@ check_proxmox_lxc() {
 install_snapserver() {
     log_info "Checking for latest Snapserver release..."
     
-    # Get latest release tag
-    LATEST_RELEASE=$(curl -s https://api.github.com/repos/badaix/snapcast/releases/latest | jq -r .tag_name)
-    VERSION=${LATEST_RELEASE#v} # Remove 'v' prefix
+    # Get latest release tag with better error handling
+    # Use -f to fail on server errors, -L to follow redirects
+    # Added User-Agent to avoid some API blocks
+    LATEST_RELEASE=$(curl -s -f -L -H "User-Agent: Snapserver-Manager" https://api.github.com/repos/badaix/snapcast/releases/latest | jq -r .tag_name 2>/dev/null)
     
-    if [[ -z "$VERSION" || "$VERSION" == "null" ]]; then
-        log_error "Failed to fetch latest version. Check internet connection."
-        read -p "Press Enter to continue..."
-        return
+    # Check if curl/jq failed or returned empty/null
+    if [[ -z "$LATEST_RELEASE" || "$LATEST_RELEASE" == "null" ]]; then
+        log_error "Failed to fetch latest version automatically."
+        echo -e "${YELLOW}This could be due to network issues or GitHub API rate limits.${NC}"
+        echo ""
+        read -p "Would you like to enter the version manually? (y/N): " manual_choice
+        
+        if [[ "$manual_choice" =~ ^[Yy]$ ]]; then
+            read -p "Enter version (e.g., 0.28.0): " MANUAL_VERSION
+            # Strip 'v' if user typed it
+            VERSION=${MANUAL_VERSION#v}
+            LATEST_RELEASE="v$VERSION"
+        else
+            log_error "Installation aborted."
+            read -p "Press Enter to continue..."
+            return
+        fi
+    else
+        VERSION=${LATEST_RELEASE#v} # Remove 'v' prefix
     fi
     
-    log_info "Latest version: ${GREEN}$VERSION${NC}"
+    log_info "Version to install: ${GREEN}$VERSION${NC}"
     
     # Detect Architecture
     ARCH=$(dpkg --print-architecture)
@@ -143,6 +159,7 @@ install_snapserver() {
         log_success "Snapserver installed successfully!"
     else
         log_error "Failed to download package."
+        echo -e "${YELLOW}URL attempted: $DOWNLOAD_URL${NC}"
     fi
     read -p "Press Enter to continue..."
 }
