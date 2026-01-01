@@ -4,10 +4,28 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.13"
+VERSION="1.5.14"
 
 # Fix for "Invalid option" loop when running via curl | bash
-# This forces the script to read from the terminal instead of stdin (pipe)
+# If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
+if [ ! -t 0 ]; then
+    echo "⚠️  Script detected piped execution (curl | bash)."
+    echo "📥 Downloading script to /tmp/snapserver-manager.sh to allow interactive input..."
+    
+    # URL to this script
+    SCRIPT_URL="https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/main/snapserver-manager.sh"
+    
+    if curl -s -L "$SCRIPT_URL" -o /tmp/snapserver-manager.sh; then
+        chmod +x /tmp/snapserver-manager.sh
+        echo "🚀 Re-launching script..."
+        exec /bin/bash /tmp/snapserver-manager.sh "$@" < /dev/tty
+    else
+        echo "❌ Failed to download script. Please run manually."
+        exit 1
+    fi
+fi
+
+# Ensure we have a TTY for input (redundant if relaunched, but good for direct ./ execution without tty)
 exec < /dev/tty
 
 # --- Colors & Styling ---
