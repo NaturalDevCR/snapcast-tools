@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.9 (Multi-Instance + Host Support)
+# setup-snapclient.sh - v3.9.1 (Installer Hang Fix)
 # Restores accidentally deleted functions `fix_alsa_order` and
 # `generate_diagnostics` for full menu functionality.
 #
@@ -8,7 +8,26 @@
 # ==============================================================================
 
 set -Eeuo pipefail
-exec </dev/tty
+# If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
+if [ ! -t 0 ]; then
+    echo "⚠️  Script detected piped execution (curl | bash)."
+    echo "📥 Downloading script to /tmp/snapclient-setup.sh to allow interactive input..."
+    
+    # URL to this script
+    SCRIPT_URL="https://raw.githubusercontent.com/NaturalDevCR/snapcast-tools/main/snapclient-setup.sh"
+    
+    if curl -s -L "$SCRIPT_URL" -o /tmp/snapclient-setup.sh; then
+        chmod +x /tmp/snapclient-setup.sh
+        echo "🚀 Re-launching script..."
+        exec /bin/bash /tmp/snapclient-setup.sh "$@" < /dev/tty
+    else
+        echo "❌ Failed to download script. Please run manually."
+        exit 1
+    fi
+fi
+
+# Ensure we have a TTY for input (redundant if relaunched, but good for direct ./ execution without tty)
+exec < /dev/tty
 
 # === HELPER FUNCTIONS =======================================================
 
@@ -798,7 +817,7 @@ main() {
   while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.1"
     echo "═══════════════════════════════════════════════════"
     echo "1️⃣  Check prerequisites & ALSA modules (Host)"
     echo "2️⃣  Fix host ALSA card order"
