@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.10"
+VERSION="1.5.11"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # This forces the script to read from the terminal instead of stdin (pipe)
@@ -178,7 +178,7 @@ manage_service() {
         echo "4. Check Status"
         echo "5. Back to Main Menu"
         echo -e "${CYAN}--------------------------${NC}"
-        read -p "Select an option: " choice
+        read -p "Select an option: " choice || exit 1
         
         case $choice in
             1) systemctl start "$SERVICE_NAME" && log_success "Service started." ;;
@@ -610,7 +610,7 @@ manage_tcp_watchdog() {
         echo "5. Back to Main Menu"
         echo -e "${CYAN}-------------------------------${NC}"
         
-        read -p "Select an option: " choice
+        read -p "Select an option: " choice || exit 1
         
         case $choice in
             1)
@@ -721,7 +721,7 @@ manage_sources() {
         echo "3. Remove Source"
         echo "4. Back to Main Menu"
         echo -e "${CYAN}-----------------------------${NC}"
-        read -p "Select an option: " choice
+        read -p "Select an option: " choice || exit 1
         
         case $choice in
             1)
@@ -885,7 +885,7 @@ show_menu() {
         echo "6. Exit"
         echo -e "${CYAN}--------------------------------------------------${NC}"
         
-        read -p "Select an option: " choice
+        read -p "Select an option: " choice || exit 1
         
         case $choice in
             1) install_snapserver ;;
