@@ -4,7 +4,11 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.9"
+VERSION="1.5.10"
+
+# Fix for "Invalid option" loop when running via curl | bash
+# This forces the script to read from the terminal instead of stdin (pipe)
+exec < /dev/tty
 
 # --- Colors & Styling ---
 RED='\033[0;31m'
