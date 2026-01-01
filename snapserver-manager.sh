@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.11"
+VERSION="1.5.12"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # This forces the script to read from the terminal instead of stdin (pipe)
@@ -108,6 +108,20 @@ check_proxmox_lxc() {
     return 1
 }
 
+detect_debian_codename() {
+    # If lsb_release is available, use it
+    if command -v lsb_release &> /dev/null; then
+        lsb_release -cs
+    else
+        # Fallback to reading /etc/os-release
+        if [[ -f /etc/os-release ]]; then
+           grep VERSION_CODENAME= /etc/os-release | cut -d= -f2 2>/dev/null || echo "bookworm" # Default to bookworm if fail
+        else
+           echo "bookworm"
+        fi
+    fi
+}
+
 # --- Core Functions ---
 
 install_snapserver() {
@@ -143,29 +157,54 @@ install_snapserver() {
     
     # Detect Architecture
     ARCH=$(dpkg --print-architecture)
-    DEB_FILE="snapserver_${VERSION}-1_${ARCH}.deb"
-    DOWNLOAD_URL="https://github.com/badaix/snapcast/releases/download/${LATEST_RELEASE}/${DEB_FILE}"
+    CODENAME=$(detect_debian_codename)
+    
+    # Try distro-specific filename first (starting from v0.29+, badaix/snapcast uses _codename in filename)
+    # e.g. snapserver_0.34.0-1_amd64_bookworm.deb
+    DEB_SPECIFIC="snapserver_${VERSION}-1_${ARCH}_${CODENAME}.deb"
+    URL_SPECIFIC="https://github.com/badaix/snapcast/releases/download/${LATEST_RELEASE}/${DEB_SPECIFIC}"
+    
+    # Legacy filename (older versions or generic)
+    # e.g. snapserver_0.28.0-1_amd64.deb
+    DEB_GENERIC="snapserver_${VERSION}-1_${ARCH}.deb"
+    URL_GENERIC="https://github.com/badaix/snapcast/releases/download/${LATEST_RELEASE}/${DEB_GENERIC}"
     
     log_info "Detected architecture: ${YELLOW}$ARCH${NC}"
-    log_info "Downloading $DEB_FILE..."
+    log_info "Detected OS codename: ${YELLOW}$CODENAME${NC}"
     
-    if wget -q --show-progress "$DOWNLOAD_URL"; then
-        log_success "Download complete."
-        log_info "Installing Snapserver..."
-        dpkg -i "$DEB_FILE"
-        
-        if [[ $? -ne 0 ]]; then
-            log_warn "Dependency issues detected. Fixing..."
-            apt-get -f install -y
-        fi
-        
-        rm "$DEB_FILE"
-        log_success "Snapserver installed successfully!"
+    # Try downloading specific version first
+    log_info "Attempting download: $DEB_SPECIFIC"
+    if wget -q --show-progress "$URL_SPECIFIC"; then
+        DEB_FILE="$DEB_SPECIFIC"
+        log_success "Download complete ($DEB_SPECIFIC)."
     else
-        log_error "Failed to download package."
-        echo -e "${YELLOW}URL attempted: $DOWNLOAD_URL${NC}"
+        log_warn "Specific package not found ($DEB_SPECIFIC)."
+        log_info "Attempting fallback to generic/legacy: $DEB_GENERIC"
+        
+        if wget -q --show-progress "$URL_GENERIC"; then
+            DEB_FILE="$DEB_GENERIC"
+             log_success "Download complete ($DEB_GENERIC)."
+        else
+            log_error "Failed to download package."
+            echo -e "${YELLOW}Urls attempted:${NC}"
+            echo "1. $URL_SPECIFIC"
+            echo "2. $URL_GENERIC"
+            read -p "Press Enter to continue..."
+            return
+        fi
     fi
-    read -p "Press Enter to continue..."
+
+    log_info "Installing Snapserver from $DEB_FILE..."
+    dpkg -i "$DEB_FILE"
+    
+    if [[ $? -ne 0 ]]; then
+        log_warn "Dependency issues detected. Fixing..."
+        apt-get -f install -y
+    fi
+    
+    rm "$DEB_FILE"
+    log_success "Snapserver installed successfully!"
+    read -p "Press Enter to continue..." || exit 1
 }
 
 manage_service() {
