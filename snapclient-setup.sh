@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.9.2 (UI/UX Improvements)
+# setup-snapclient.sh - v3.9.3 (Fix Unbound Color Variables)
 # Restores accidentally deleted functions `fix_alsa_order` and
 # `generate_diagnostics` for full menu functionality.
 #
@@ -28,6 +28,14 @@ fi
 
 # Ensure we have a TTY for input (redundant if relaunched, but good for direct ./ execution without tty)
 exec < /dev/tty
+
+# === COLORS =================================================================
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
 
 # === HELPER FUNCTIONS =======================================================
 
@@ -847,7 +855,7 @@ main() {
   while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.2"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.3"
     echo "═══════════════════════════════════════════════════"
     echo "1️⃣  Check prerequisites & ALSA modules (Host)"
     echo "2️⃣  Fix host ALSA card order"
