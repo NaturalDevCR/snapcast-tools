@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.9.1 (Installer Hang Fix)
+# setup-snapclient.sh - v3.9.2 (UI/UX Improvements)
 # Restores accidentally deleted functions `fix_alsa_order` and
 # `generate_diagnostics` for full menu functionality.
 #
@@ -438,11 +438,25 @@ manage_multi_instances() {
   while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🏗️  MULTI-INSTANCE MANAGER (Bare Metal)"
+    echo "      🏗️  MULTI-INSTANCE MANAGER & SERVICE CONTROL"
     echo "═══════════════════════════════════════════════════"
     
+    # Check default service status
+    local DEF_STATUS="Stopped/Disabled"
+    if systemctl is-active --quiet snapclient; then
+      DEF_STATUS="${GREEN}Running${NC}"
+    else
+      if systemctl is-enabled --quiet snapclient 2>/dev/null; then
+         DEF_STATUS="${YELLOW}Stopped (Enabled)${NC}"
+      else
+         DEF_STATUS="${RED}Disabled${NC}"
+      fi
+    fi
+    echo -e "Default Service (snapclient): $DEF_STATUS"
+    
     # List active instances
-    echo "Active Instances:"
+    echo "---------------------------------------------------"
+    echo "Active Multi-Instances:"
     local FOUND=0
     for conf in /etc/default/snapclient-*; do
       if [[ -f "$conf" ]]; then
@@ -459,11 +473,15 @@ manage_multi_instances() {
     
     echo "1️⃣  Add New Instance"
     echo "2️⃣  Remove Instance"
-    echo "3️⃣  Back to Main Menu"
+    echo "3️⃣  Enable/Start Default Service"
+    echo "4️⃣  Disable/Stop Default Service"
+    echo "5️⃣  Back to Main Menu"
     echo ""
     read -rp "Select option: " M_OPT
     
     case "$M_OPT" in
+    
+
       1)
         # Add Instance
         read -rp "🔹 Enter Instance ID (integer, e.g. 1, 2): " NEW_ID
@@ -517,8 +535,20 @@ manage_multi_instances() {
         fi
         pause
         ;;
-        
-      3) return ;;
+      3)
+        echo "🚀 Enabling and starting default snapclient..."
+        systemctl enable --now snapclient
+        systemctl status snapclient --no-pager
+        pause
+        ;;
+      4)
+        echo "🛑 Stopping and disabling default snapclient..."
+        systemctl stop snapclient
+        systemctl disable snapclient
+        echo "✅ Default service disabled."
+        pause
+        ;;
+      5) return ;;
       *) echo "❌ Invalid option." ; sleep 1 ;;
     esac
   done
@@ -817,7 +847,7 @@ main() {
   while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.1"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.2"
     echo "═══════════════════════════════════════════════════"
     echo "1️⃣  Check prerequisites & ALSA modules (Host)"
     echo "2️⃣  Fix host ALSA card order"
@@ -827,7 +857,7 @@ main() {
     echo "5️⃣  🔄 Update existing Snapclient config (IP/Audio)"
     echo "6️⃣  🔎 Verify existing Snapclient"
     echo "7️⃣  🧾 Generate diagnostics report"
-    echo "8️⃣  🏗️  Manage Multi-Instance Clients (Bare Metal)"
+    echo "8️⃣  🏗️  Manage Multi-Instance Clients & Service"
     echo "9️⃣  🚪 Exit"
     echo "═══════════════════════════════════════════════════"
     read -rp "Select an option [1-9]: " opt
