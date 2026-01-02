@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.9.3 (Fix Unbound Color Variables)
+# setup-snapclient.sh - v3.9.4 (Fix Audio Device Parsing)
 # Restores accidentally deleted functions `fix_alsa_order` and
 # `generate_diagnostics` for full menu functionality.
 #
@@ -291,7 +291,7 @@ prompt_audio_device() {
   fi
 
   # Get devices for this card
-  mapfile -t DEVICE_NUMS < <(aplay -l 2>/dev/null | awk -v id="$SELECTED_CARD_ID" '/^card/ && $2==id":" {print $6}' | sed 's/,//')
+  mapfile -t DEVICE_NUMS < <(aplay -l 2>/dev/null | grep "^card ${SELECTED_CARD_ID}:" | sed -n 's/.*device \([0-9]*\):.*/\1/p')
   
   if [ ${#DEVICE_NUMS[@]} -eq 0 ]; then
     echo "❌ No ALSA devices detected for card $SELECTED_CARD_ID."
@@ -311,14 +311,14 @@ prompt_audio_device() {
     SELECTED_CARD_NAME=$(cat "/proc/asound/card${SELECTED_CARD_ID}/id")
   else
     # Fallback parsing
-    SELECTED_CARD_NAME=$(aplay -l 2>/dev/null | awk -v id="$SELECTED_CARD_ID" -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
+    SELECTED_CARD_NAME=$(aplay -l 2>/dev/null | grep "^card ${SELECTED_CARD_ID}:" | head -n1 | sed -n 's/.*\[\(.*\)\].*/\1/p')
   fi
   
   local SAFE_CARD_NAME=$(echo "$SELECTED_CARD_NAME" | tr -d ' ')
   SELECTED_ALSA_DEVICE="plughw:CARD=$SAFE_CARD_NAME,DEV=$DEV_ID"
   
   # Get Description
-  SELECTED_DEVICE_DESC=$(aplay -l 2>/dev/null | awk -v id="$SELECTED_CARD_ID" -F'[][]' '/^card/{if ($2==id) {print $4; exit}}')
+  SELECTED_DEVICE_DESC=$(aplay -l 2>/dev/null | grep "^card ${SELECTED_CARD_ID}:" | grep "device ${DEV_ID}:" | head -n1 | sed -n 's/.*\[\(.*\)\].*/\1/p')
   
   echo ""
   echo "✅ Selected: Card $SELECTED_CARD_ID ($SELECTED_DEVICE_DESC), Device $DEV_ID"
@@ -855,7 +855,7 @@ main() {
   while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.3"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.4"
     echo "═══════════════════════════════════════════════════"
     echo "1️⃣  Check prerequisites & ALSA modules (Host)"
     echo "2️⃣  Fix host ALSA card order"
