@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.9.5 (Host Install options)
+# setup-snapclient.sh - v3.9.6 (Custom Multi-Instance HostID)
 # Restores accidentally deleted functions `fix_alsa_order` and
 # `generate_diagnostics` for full menu functionality.
 #
@@ -420,7 +420,7 @@ Type=simple
 User=root
 Group=audio
 EnvironmentFile=-/etc/default/snapclient-%i
-ExecStart=/usr/bin/snapclient --instance %i --hostID snapclient-%i \$SNAPCLIENT_OPTS
+ExecStart=/usr/bin/snapclient --instance %i \$SNAPCLIENT_OPTS
 Restart=always
 RestartSec=5
 
@@ -470,9 +470,10 @@ manage_multi_instances() {
       if [[ -f "$conf" ]]; then
         local ID="${conf##*-}"
         local HOST=$(grep -oP '(?<=--host )[^ ]*' "$conf" || echo "Unknown")
+        local H_ID=$(grep -oP '(?<=--hostID )[^ ]*' "$conf" || echo "snapclient-$ID")
         local DEV=$(grep -oP '(?<=--soundcard )plughw:[^ ]*' "$conf" || echo "Unknown")
         local STATUS=$(systemctl is-active "snapclient@$ID")
-        echo "  • ID $ID: $STATUS (Host: $HOST, Dev: $DEV)"
+        echo "  • ID $ID: $STATUS (Name: $H_ID, IP: $HOST, Dev: $DEV)"
         FOUND=1
       fi
     done
@@ -507,6 +508,10 @@ manage_multi_instances() {
         
         read -rp "🔹 Enter Snapserver IP: " SIP
         
+        # Custom Host ID
+        read -rp "🔹 Enter Client/Host Name [default: snapclient-$NEW_ID]: " CUSTOM_HOST_ID
+        [[ -z "$CUSTOM_HOST_ID" ]] && CUSTOM_HOST_ID="snapclient-$NEW_ID"
+        
         # Audio Selection
         if prompt_audio_device; then
            local AUDIO_DEV="$SELECTED_ALSA_DEVICE"
@@ -517,9 +522,9 @@ manage_multi_instances() {
         fi
         
         local CONF_FILE="/etc/default/snapclient-$NEW_ID"
-        echo "SNAPCLIENT_OPTS=\"--host $SIP --soundcard $AUDIO_DEV --player alsa:buffer_time=50\"" > "$CONF_FILE"
+        echo "SNAPCLIENT_OPTS=\"--host $SIP --hostID $CUSTOM_HOST_ID --soundcard $AUDIO_DEV --player alsa:buffer_time=50\"" > "$CONF_FILE"
         
-        # Ensure template exists
+        # Ensure template exists (re-install in case user had old template)
         install_multi_instance_service_template
         
         echo "🚀 Enabling and starting snapclient@$NEW_ID..."
@@ -874,7 +879,7 @@ main() {
   while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.5"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.6"
     echo "═══════════════════════════════════════════════════"
     echo "1️⃣  Check prerequisites & ALSA modules (Host)"
     echo "2️⃣  Fix host ALSA card order"
