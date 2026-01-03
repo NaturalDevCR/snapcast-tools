@@ -1,6 +1,6 @@
 #!/bin/bash
 # ==============================================================================
-# setup-snapclient.sh - v3.9.4 (Fix Audio Device Parsing)
+# setup-snapclient.sh - v3.9.5 (Host Install options)
 # Restores accidentally deleted functions `fix_alsa_order` and
 # `generate_diagnostics` for full menu functionality.
 #
@@ -637,8 +637,27 @@ CONF
   fi
   
   echo "🚀 Starting Snapclient service..."
-  systemctl enable --now snapclient
-  systemctl restart snapclient
+  
+  local ENABLE_SERVICE=true
+  # If on Host/Bare Metal (not LXC), ask if user wants to disable default service for multi-instance
+  if [[ "$(detect_environment)" != "lxc" ]]; then
+      echo ""
+      echo "ℹ️  If you plan to use Multi-Instance Manager, you might want to disable the default service."
+      read -rp "🤖 Do you want to DISABLE the default snapclient service? [y/N]: " DIS_SVC
+      if [[ "$DIS_SVC" =~ ^[Yy]$ ]]; then
+          ENABLE_SERVICE=false
+      fi
+  fi
+
+  if [ "$ENABLE_SERVICE" = true ]; then
+      systemctl enable --now snapclient
+      systemctl restart snapclient
+      echo "✅ Default snapclient service is RUNNING."
+  else
+      systemctl stop snapclient 2>/dev/null || true
+      systemctl disable snapclient 2>/dev/null || true
+      echo "⚠️  Default snapclient service is DISABLED (ready for multi-instance configuration)."
+  fi
   
   # Install the multi-instance template as well, for future use
   install_multi_instance_service_template
@@ -855,7 +874,7 @@ main() {
   while :; do
     clear
     echo "═══════════════════════════════════════════════════"
-    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.4"
+    echo "      🎧 SNAPCLIENT AUDIO MANAGER v3.9.5"
     echo "═══════════════════════════════════════════════════"
     echo "1️⃣  Check prerequisites & ALSA modules (Host)"
     echo "2️⃣  Fix host ALSA card order"
