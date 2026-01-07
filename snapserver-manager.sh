@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.14"
+VERSION="1.5.15"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
@@ -420,34 +420,37 @@ install_tcp_watchdog() {
     done <<< "$ports"
     
     echo ""
+    echo -e "${BOLD}Advanced Recovery Settings:${NC}"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "The watchdog can attempt to recover deadlocked streams using a graduated response:"
+    echo "  1. Kill connections (Strike 1 & 3)"
+    echo "  2. Soft Reload (SIGUSR1) (Strike 2)"
+    echo "  3. Service RESTART (Strike 4 - Nuclear Option)"
+    echo ""
+    read -p "Enable AUTO-RESTART of Snapserver if a stream is deadlocked for >6 minutes? (y/N): " enable_restart
+    
+    local AUTO_RESTART="false"
+    if [[ "$enable_restart" =~ ^[Yy]$ ]]; then
+        AUTO_RESTART="true"
+        echo -e "${YELLOW}>> Auto-Restart ENABLED. The service will restart if deadlocks persist.${NC}"
+    else
+        echo -e "${GREEN}>> Auto-Restart DISABLED. The watchdog will only log the Critical event.${NC}"
+    fi
+
+    echo ""
     echo -e "${BOLD}Watchdog Behavior:${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo -e "  • Monitors the above TCP port(s) for zombie connections"
-    echo -e "  • Runs automatically every ${BOLD}2 minutes${NC}"
-    echo -e "  • Closes stuck connections (${BOLD}FD only${NC}, not the entire process)"
-    echo "  • Logs activity to /var/log/snapcast-tcp-watchdog.log"
+    echo -e "  • Monitors TCP port(s) for zombie connections every ${BOLD}2 minutes${NC}"
+    echo -e "  • Uses a 'Strike System' to track persistent failures"
+    echo -e "  • Logs detailed diagnostics to /var/log/snapcast-tcp-watchdog.log"
     echo ""
-    
-    # Show current status if installed
-    if [[ "$is_installed" == true ]]; then
-        echo -e "${BOLD}Current Installation Status:${NC}"
-        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-        if [[ "$is_running" == true ]]; then
-            echo -e "  Status: ${GREEN}Installed and Running${NC}"
-            echo "  This will ${BOLD}UPDATE${NC} the existing watchdog configuration."
-        else
-            echo -e "  Status: ${YELLOW}Installed but Stopped${NC}"
-            echo "  This will ${BOLD}UPDATE and START${NC} the watchdog."
-        fi
-        echo ""
-    fi
     
     # Confirm installation/update
     echo -e "${CYAN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
     if [[ "$is_installed" == true ]]; then
-        read -p "Do you want to UPDATE the TCP Watchdog? (y/N): " confirm
+        read -p "Do you want to UPDATE the TCP Watchdog with these settings? (y/N): " confirm
     else
-        read -p "Do you want to INSTALL the TCP Watchdog? (y/N): " confirm
+        read -p "Do you want to INSTALL the TCP Watchdog with these settings? (y/N): " confirm
     fi
     
     if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
@@ -464,107 +467,176 @@ install_tcp_watchdog() {
     local timer_file="/etc/systemd/system/snapcast-tcp-watchdog.timer"
     
     # Create watchdog script
-    cat > "$watchdog_script" << 'WATCHDOG_EOF'
+    cat > "$watchdog_script" << WATCHDOG_EOF
 #!/bin/bash
-# Snapcast TCP Watchdog - Monitors and kills zombie TCP connections
-# NOTE: Closes only the TCP connection (FD), NOT the entire process
+# Snapcast TCP Watchdog - Smart Recovery for Zombie Connections & Deadlocks
+# Strategy: Graduated Response (Kill -> Soft Reload -> Restart)
 
 CONFIG_FILE="/etc/snapserver.conf"
 LOG_FILE="/var/log/snapcast-tcp-watchdog.log"
+STRIKE_FILE="/tmp/snapcast_watchdog_strikes.db"
+ENABLE_AUTO_RESTART="$AUTO_RESTART"
 
 log_msg() {
-    echo "$(date '+%Y-%m-%d %H:%M:%S') - $1" >> "$LOG_FILE"
+    echo "\$(date '+%Y-%m-%d %H:%M:%S') - \$1" >> "\$LOG_FILE"
+}
+
+get_strikes() {
+    local port=\$1
+    if [ -f "\$STRIKE_FILE" ]; then
+        grep "^\$port=" "\$STRIKE_FILE" | cut -d= -f2 || echo "0"
+    else
+        echo "0"
+    fi
+}
+
+set_strikes() {
+    local port=\$1
+    local strikes=\$2
+    
+    # Remove old entry if exists
+    if [ -f "\$STRIKE_FILE" ]; then
+        grep -v "^\$port=" "\$STRIKE_FILE" > "\$STRIKE_FILE.tmp"
+        mv "\$STRIKE_FILE.tmp" "\$STRIKE_FILE"
+    fi
+    
+    if [ "\$strikes" -gt 0 ]; then
+        echo "\$port=\$strikes" >> "\$STRIKE_FILE"
+    fi
 }
 
 get_tcp_ports() {
-    if [[ ! -f "$CONFIG_FILE" ]]; then
+    if [[ ! -f "\$CONFIG_FILE" ]]; then
         return 1
     fi
-    grep "source = tcp://" "$CONFIG_FILE" 2>/dev/null | \
+    grep "source = tcp://" "\$CONFIG_FILE" 2>/dev/null | \
         sed -n 's/.*tcp:\/\/[^:]*:\([0-9]*\).*/\1/p' | \
         sort -u
 }
 
-kill_zombie_connections() {
-    local port="$1"
-    local killed_count=0
+manage_deadlock() {
+    local port="\$1"
+    local total_conns="\$2"
     
-    log_msg "Checking port $port for multiple connections..."
+    local current_strikes=\$(get_strikes "\$port")
+    local new_strikes=\$((current_strikes + 1))
     
-    # Get all connections on this port
-    # We only care about ESTABLISHED connections
-    local conn_data=$(ss -top state established "( sport = :${port} )" 2>/dev/null | awk 'NR>1 {print $0}')
+    log_msg "ALERT: Port \$port has \$total_conns connections (Strike \$current_strikes -> \$new_strikes)."
     
-    if [[ -z "$conn_data" ]]; then
-        return 0
-    fi
-    
-    # Count total connections
-    local total_conns=$(echo "$conn_data" | grep -c .)
-    
-    if [[ "$total_conns" -gt 1 ]]; then
-        log_msg "WARNING: Multiple connections detected on port $port (Count: $total_conns). Limit is 1."
-        log_msg "Closing ALL connections on port $port..."
+    # Escalation Logic
+    if [ "\$new_strikes" -ge 4 ]; then
+        # STRIKE 4: CRITICAL DEADLOCK (6+ mins)
+        log_msg "CRITICAL: Port \$port deadlocked for 6+ minutes. Actions failed."
         
-        # Kill all connections found
-        while IFS= read -r line; do
-             # Extract Peer Address (Dst)
-             # Try standard column 5 (if Recv-Q column exists) or 4
-             local peer=$(echo "$line" | awk '{
-                 if ($1 ~ /^[0-9]+$/) print $5;
-                 else print $5;
-             }')
-             
-             # Fallback
-             if [[ ! "$peer" =~ .*:.* ]]; then
-                 peer=$(echo "$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | tail -n1)
-             fi
+        if [ "\$ENABLE_AUTO_RESTART" == "true" ]; then
+            log_msg "ACTION: NUCLEAR OPTION - Triggering Snapserver Service RESTART."
+            systemctl restart snapserver
+            log_msg "RESULT: Service restarted. Resetting strikes."
+            set_strikes "\$port" "0" 
+            return # Exit function, service is restarting anyway
+        else
+            log_msg "ACTION: [BLOCKED] Would restart service, but AUTO-RESTART is disabled."
+            log_msg "ACTION: Killing connections again (Attempt to mitigate)."
+            kill_connections "\$port"
+            # Keep strikes at max to keep alerting? Or reset? 
+            # Resetting to 2 to retry Soft Reload loop seems safer to avoid spamming logs with 'Would restart'
+            set_strikes "\$port" "2"
+        fi
+        
+    elif [ "\$new_strikes" -eq 2 ]; then
+        # STRIKE 2: SOFT RELOAD (2 mins)
+        # Previous kill didn't work, app might be stuck. Try waking it up.
+        log_msg "WARNING: Persistent Issue on Port \$port. Killing connections failed."
+        log_msg "ACTION: Sending SIGUSR1 (Soft Reload) to Snapserver."
+        
+        # Find main PID accurately
+        local SNAP_PID=\$(pgrep -x snapserver | head -n1)
+        if [[ -n "\$SNAP_PID" ]]; then
+            kill -USR1 "\$SNAP_PID"
+            log_msg "DEBUG: Signal sent to PID \$SNAP_PID."
+        else
+            log_msg "ERROR: Could not find Snapserver PID."
+        fi
+        
+        set_strikes "\$port" "\$new_strikes"
 
-             if [[ -n "$peer" ]]; then
-                 if ss -K dst "$peer" 2>/dev/null; then
-                     ((killed_count++))
-                     log_msg "Closed: $peer"
-                 fi
-             fi
-        done <<< "$conn_data"
-        
-        [[ $killed_count -gt 0 ]] && log_msg "Cleaned up $killed_count connection(s) on port $port."
+    else
+        # STRIKE 1 & 3: KILL CONNECTIONS (0 mins & 4 mins)
+        # Standard cleanup.
+        log_msg "ACTION: Killing \$total_conns zombie connection(s) on port \$port."
+        kill_connections "\$port"
+        set_strikes "\$port" "\$new_strikes"
     fi
 }
 
+kill_connections() {
+    local port="\$1"
+    local conn_data=\$(ss -top state established "( sport = :\$port )" 2>/dev/null | awk 'NR>1 {print \$0}')
+    
+    while IFS= read -r line; do
+         local peer=\$(echo "\$line" | awk '{ if (\$1 ~ /^[0-9]+\$/) print \$5; else print \$5; }')
+         if [[ ! "\$peer" =~ .*:.* ]]; then
+             peer=\$(echo "\$line" | grep -oE '[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+:[0-9]+' | tail -n1)
+         fi
+
+         if [[ -n "\$peer" ]]; then
+             if ss -K dst "\$peer" 2>/dev/null; then
+                 log_msg "  > Closed socket: \$peer"
+             fi
+         fi
+    done <<< "\$conn_data"
+}
+
 # Main execution
-log_msg "TCP Watchdog starting scan"
+log_msg "--- Watchdog Scan Start ---"
 
-ports=$(get_tcp_ports)
+ports=\$(get_tcp_ports)
 
-if [[ -n "$ports" ]]; then
+if [[ -n "\$ports" ]]; then
     while IFS= read -r port; do
-        [[ -n "$port" ]] && kill_zombie_connections "$port"
-    done <<< "$ports"
+        [[ -z "\$port" ]] && continue
+        
+        # Check active connections
+        conn_data=\$(ss -top state established "( sport = :\$port )" 2>/dev/null | awk 'NR>1 {print \$0}')
+        total_conns=0
+        if [[ -n "\$conn_data" ]]; then
+            total_conns=\$(echo "\$conn_data" | grep -c .)
+        fi
+        
+        if [[ "\$total_conns" -gt 1 ]]; then
+            # Problem Detected
+            manage_deadlock "\$port" "\$total_conns"
+        else
+            # Healthy (0 or 1 connection)
+            # If we had strikes before, clear them now.
+            if [ "\$(get_strikes "\$port")" -gt 0 ]; then
+                log_msg "INFO: Port \$port recovered (Active connections: \$total_conns). Resetting strikes."
+                set_strikes "\$port" "0"
+            fi
+        fi
+    done <<< "\$ports"
 else
-    log_msg "No TCP sources found in configuration"
+    log_msg "No TCP sources found."
 fi
-
-log_msg "TCP Watchdog scan completed"
 WATCHDOG_EOF
 
     chmod +x "$watchdog_script"
     
     # Create systemd service
-    cat > "$service_file" << 'SERVICE_EOF'
+    cat > "$service_file" << SERVICE_EOF
 [Unit]
-Description=Snapcast TCP Watchdog - Monitor and kill zombie TCP connections
+Description=Snapcast TCP Watchdog - Smart Recovery
 After=network.target snapserver.service
 
 [Service]
 Type=oneshot
-ExecStart=/usr/local/bin/snapcast-tcp-watchdog.sh
+ExecStart=$watchdog_script
 StandardOutput=journal
 StandardError=journal
 SERVICE_EOF
 
     # Create systemd timer (runs every 2 minutes)
-    cat > "$timer_file" << 'TIMER_EOF'
+    cat > "$timer_file" << TIMER_EOF
 [Unit]
 Description=Run Snapcast TCP Watchdog every 2 minutes
 Requires=snapcast-tcp-watchdog.service
@@ -584,16 +656,10 @@ TIMER_EOF
     systemctl restart snapcast-tcp-watchdog.timer
     
     echo ""
-    log_success "TCP Watchdog installed and started successfully!"
-    echo ""
-    echo -e "${BOLD}Monitoring:${NC} $port_count TCP port(s)"
-    echo -e "${BOLD}Interval:${NC} Every 2 minutes"
-    echo -e "${BOLD}Logs:${NC} /var/log/snapcast-tcp-watchdog.log"
-    echo ""
-    echo -e "${CYAN}Useful commands:${NC}"
-    echo "  • View logs: journalctl -u snapcast-tcp-watchdog.service -f"
-    echo "  • Check timer: systemctl status snapcast-tcp-watchdog.timer"
-    echo "  • Manual run: /usr/local/bin/snapcast-tcp-watchdog.sh"
+    log_success "TCP Watchdog updated successfully!"
+    echo "  • Recovery Mode: Graduated (Kill -> USR1 -> Restart)"
+    echo "  • Auto-Restart: $AUTO_RESTART"
+    echo "  • Logs: $LOG_FILE"
     echo ""
 }
 
