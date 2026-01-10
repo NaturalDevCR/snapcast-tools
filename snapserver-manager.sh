@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.16"
+VERSION="1.5.17"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
@@ -745,27 +745,40 @@ detailed_watchdog_status() {
         if [[ -z "$details" ]]; then
              echo -e "${YELLOW}  No active connections.${NC}"
         else
-             echo -e "${CYAN}  %-20s %-12s %-10s %-10s${NC}" "Remote Address" "State" "Recv-Q" "Send-Q"
+             # Fix header formatting using printf
+             printf "${CYAN}  %-25s %-12s %-10s %-10s${NC}\n" "Remote Address" "State" "Recv-Q" "Send-Q"
              
              while IFS= read -r line; do
-                 # Basic fields
+                 # Skip empty lines
+                 [[ -z "$line" ]] && continue
+                 
+                 # Check if this is a continuation line (starts with space/tab) representing stats
+                 if [[ "$line" =~ ^[[:space:]] ]]; then
+                     # This is a stats line (e.g., rtt, cwnd, etc.)
+                     # Clean it up and print neatly
+                     echo -e "    ${LOW_INTENSITY}↳ $line${NC}"
+                     continue
+                 fi
+
+                 # It's a connection line
+                 # Expected format: State Recv-Q Send-Q Local Peer
+                 # But sometimes ss is weird. Let's try to grab the defined columns.
+                 
                  local state=$(echo "$line" | awk '{print $1}')
                  local recvq=$(echo "$line" | awk '{print $2}')
                  local sendq=$(echo "$line" | awk '{print $3}')
+                 # $4 is Local, $5 is Peer
                  local remote=$(echo "$line" | awk '{print $5}')
                  
                  # Colorize state
                  local state_color="$GREEN"
                  [[ "$state" != "ESTAB" ]] && state_color="$YELLOW"
                  
-                 printf "  %-20s ${state_color}%-12s${NC} %-10s %-10s\n" "$remote" "$state" "$recvq" "$sendq"
+                 # Highlight high queues
+                 if [[ "$recvq" -gt 1000 ]]; then recvq="${RED}${recvq}${NC}"; fi
+                 if [[ "$sendq" -gt 1000 ]]; then sendq="${RED}${sendq}${NC}"; fi
                  
-                 # Extract internal info (rtt, bytes_received, etc) if available
-                 # Just dump the extended info line nicely indented
-                 local ext_info=$(echo "$line" | grep -oE '\(.*\)')
-                 if [[ -n "$ext_info" ]]; then
-                    echo -e "    ${LOW_INTENSITY}↳ Stats: $ext_info${NC}"
-                 fi
+                 printf "  %-25s ${state_color}%-12s${NC} %-10s %-10s\n" "$remote" "$state" "$recvq" "$sendq"
                  
              done <<< "$details"
         fi
