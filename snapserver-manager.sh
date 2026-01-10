@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.21"
+VERSION="1.5.22"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
@@ -774,13 +774,15 @@ print_watchdog_status_logic() {
                  [[ "$state" != "ESTAB" ]] && state_color="$YELLOW"
                  
                  # Highlight high queues based on Snapcast best practices:
-                 # < 64KB: Healthy (Normal buffering)
+                 # < 64KB: Healthy (Normal buffering) -> GREEN
                  # 64KB - 256KB: Caution (Potential buffering/latency) -> YELLOW
                  # > 256KB: Critical (Likely blockage/issues) -> RED
                  if [[ "$recvq" -gt 256000 ]]; then
                      recvq="${RED}${recvq}${NC}"
                  elif [[ "$recvq" -gt 64000 ]]; then
                      recvq="${YELLOW}${recvq}${NC}"
+                 else
+                     recvq="${GREEN}${recvq}${NC}"
                  fi
                  
                  if [[ "$sendq" -gt 1000 ]]; then sendq="${RED}${sendq}${NC}"; fi
