@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.15"
+VERSION="1.5.16"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
@@ -713,6 +713,73 @@ show_watchdog_status() {
     read -p "Press Enter to continue..."
 }
 
+# detailed_watchdog_status
+detailed_watchdog_status() {
+    clear
+    echo -e "${CYAN}--- Detailed Connection Health ---${NC}"
+    echo -e "Snapshot time: $(date '+%H:%M:%S')"
+    echo ""
+
+    local ports=$(get_tcp_ports)
+    
+    if [[ -z "$ports" ]]; then
+        log_warn "No TCP sources configured."
+        read -p "Press Enter to continue..."
+        return
+    fi
+    
+    while IFS= read -r port; do
+        [[ -z "$port" ]] && continue
+        
+        # Get source name
+        local source_name=$(grep "tcp://.*:${port}" "$CONFIG_FILE" | sed -n 's/.*name=\([^&]*\).*/\1/p')
+        [[ -z "$source_name" ]] && source_name="(unnamed)"
+        
+        echo -e "${BOLD}Port ${port} (${source_name})${NC}"
+        echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+        
+        # Get detailed info using ss
+        # -t: tcp, -n: numeric, -p: process, -i: internal info (rtt, etc), -o: timer info
+        local details=$(ss -tnpio "sport = :$port" | awk 'NR>1')
+        
+        if [[ -z "$details" ]]; then
+             echo -e "${YELLOW}  No active connections.${NC}"
+        else
+             echo -e "${CYAN}  %-20s %-12s %-10s %-10s${NC}" "Remote Address" "State" "Recv-Q" "Send-Q"
+             
+             while IFS= read -r line; do
+                 # Basic fields
+                 local state=$(echo "$line" | awk '{print $1}')
+                 local recvq=$(echo "$line" | awk '{print $2}')
+                 local sendq=$(echo "$line" | awk '{print $3}')
+                 local remote=$(echo "$line" | awk '{print $5}')
+                 
+                 # Colorize state
+                 local state_color="$GREEN"
+                 [[ "$state" != "ESTAB" ]] && state_color="$YELLOW"
+                 
+                 printf "  %-20s ${state_color}%-12s${NC} %-10s %-10s\n" "$remote" "$state" "$recvq" "$sendq"
+                 
+                 # Extract internal info (rtt, bytes_received, etc) if available
+                 # Just dump the extended info line nicely indented
+                 local ext_info=$(echo "$line" | grep -oE '\(.*\)')
+                 if [[ -n "$ext_info" ]]; then
+                    echo -e "    ${LOW_INTENSITY}↳ Stats: $ext_info${NC}"
+                 fi
+                 
+             done <<< "$details"
+        fi
+        echo ""
+        
+    done <<< "$ports"
+    
+    read -p "Press Enter to refresh (r) or any other key to return: " -n 1 choice
+    echo ""
+    if [[ "$choice" =~ ^[Rr]$ ]]; then
+        detailed_watchdog_status
+    fi
+}
+
 # TCP Watchdog management menu
 manage_tcp_watchdog() {
     while true; do
@@ -728,9 +795,10 @@ manage_tcp_watchdog() {
         echo -e "${CYAN}-------------------------------${NC}"
         echo "1. Install/Enable Watchdog"
         echo "2. Run Watchdog Now (Manual)"
-        echo "3. Show Status & Logs"
-        echo "4. Uninstall Watchdog"
-        echo "5. Back to Main Menu"
+        echo "3. Show Detailed Connection Health"
+        echo "4. Show Status & Logs"
+        echo "5. Uninstall Watchdog"
+        echo "6. Back to Main Menu"
         echo -e "${CYAN}-------------------------------${NC}"
         
         read -p "Select an option: " choice || exit 1
@@ -745,16 +813,19 @@ manage_tcp_watchdog() {
                 read -p "Press Enter to continue..."
                 ;;
             3)
-                show_watchdog_status
+                detailed_watchdog_status
                 ;;
             4)
+                show_watchdog_status
+                ;;
+            5)
                 read -p "Are you sure you want to uninstall the watchdog? (y/N): " confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
                     uninstall_tcp_watchdog
                 fi
                 read -p "Press Enter to continue..."
                 ;;
-            5)
+            6)
                 return
                 ;;
             *)
