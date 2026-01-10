@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.18"
+VERSION="1.5.19"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
@@ -713,8 +713,8 @@ show_watchdog_status() {
     read -p "Press Enter to continue..."
 }
 
-# detailed_watchdog_status
-detailed_watchdog_status() {
+# Shared logic for printing status (used by static and live views)
+print_watchdog_status_logic() {
     clear
     echo -e "${CYAN}--- Detailed Connection Health ---${NC}"
     echo -e "Snapshot time: $(date '+%H:%M:%S')"
@@ -724,7 +724,6 @@ detailed_watchdog_status() {
     
     if [[ -z "$ports" ]]; then
         log_warn "No TCP sources configured."
-        read -p "Press Enter to continue..."
         return
     fi
     
@@ -786,12 +785,26 @@ detailed_watchdog_status() {
         echo ""
         
     done <<< "$ports"
+}
+
+# detailed_watchdog_status (Scanning/Snapshot)
+detailed_watchdog_status() {
+    print_watchdog_status_logic
     
     read -p "Press Enter to refresh (r) or any other key to return: " -n 1 choice
     echo ""
     if [[ "$choice" =~ ^[Rr]$ ]]; then
         detailed_watchdog_status
     fi
+}
+
+# live_watchdog_monitor (Real-time)
+live_watchdog_monitor() {
+    while true; do
+        print_watchdog_status_logic
+        echo -e "${YELLOW}Press [CTRL+C] to exit live monitor...${NC}"
+        sleep 1
+    done
 }
 
 # TCP Watchdog management menu
@@ -810,9 +823,10 @@ manage_tcp_watchdog() {
         echo "1. Install/Enable Watchdog"
         echo "2. Run Watchdog Now (Manual)"
         echo "3. Show Detailed Connection Health"
-        echo "4. Show Status & Logs"
-        echo "5. Uninstall Watchdog"
-        echo "6. Back to Main Menu"
+        echo "4. Real-time Connection Monitor"
+        echo "5. Show Status & Logs"
+        echo "6. Uninstall Watchdog"
+        echo "7. Back to Main Menu"
         echo -e "${CYAN}-------------------------------${NC}"
         
         read -p "Select an option: " choice || exit 1
@@ -830,16 +844,22 @@ manage_tcp_watchdog() {
                 detailed_watchdog_status
                 ;;
             4)
-                show_watchdog_status
+                # Trap CTRL+C to return to menu instead of exiting script
+                trap 'break' INT
+                live_watchdog_monitor
+                trap - INT
                 ;;
             5)
+                show_watchdog_status
+                ;;
+            6)
                 read -p "Are you sure you want to uninstall the watchdog? (y/N): " confirm
                 if [[ "$confirm" =~ ^[Yy]$ ]]; then
                     uninstall_tcp_watchdog
                 fi
                 read -p "Press Enter to continue..."
                 ;;
-            6)
+            7)
                 return
                 ;;
             *)
