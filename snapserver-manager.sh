@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.19"
+VERSION="1.5.20"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
@@ -774,7 +774,9 @@ print_watchdog_status_logic() {
                  [[ "$state" != "ESTAB" ]] && state_color="$YELLOW"
                  
                  # Highlight high queues
-                 if [[ "$recvq" -gt 1000 ]]; then recvq="${RED}${recvq}${NC}"; fi
+                 # Adjusted threshold to 50k based on observation that streaming clients (especially WiFi)
+                 # can maintain ~30-40k stable Recv-Q as part of normal flow control/jitter buffering.
+                 if [[ "$recvq" -gt 50000 ]]; then recvq="${RED}${recvq}${NC}"; fi
                  if [[ "$sendq" -gt 1000 ]]; then sendq="${RED}${sendq}${NC}"; fi
                  
                  # Use %b for columns that might contain color codes (backslashes)
