@@ -4,7 +4,7 @@
 # A simple, clean manager for Snapserver installations
 # Supports: Proxmox LXC, TCP Sources, TCP Watchdog, Log Viewing, Service Management
 
-VERSION="1.5.22"
+VERSION="1.5.23"
 
 # Fix for "Invalid option" loop when running via curl | bash
 # If running via pipe (stdin is not a TTY), download and run explicitly to allow interactive input
@@ -422,10 +422,13 @@ install_tcp_watchdog() {
     echo ""
     echo -e "${BOLD}Advanced Recovery Settings:${NC}"
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-    echo "The watchdog can attempt to recover deadlocked streams using a graduated response:"
-    echo "  1. Kill connections (Strike 1 & 3)"
-    echo "  2. Soft Reload (SIGUSR1) (Strike 2)"
-    echo "  3. Service RESTART (Strike 4 - Nuclear Option)"
+    echo "The watchdog uses a graduated response to recover deadlocked streams:"
+    echo "  1. Kill zombie sockets with ss -K (Strike 1)"
+    echo "  2. Retry kill with delay (Strike 2 & 3)"
+    echo "  3. Service RESTART (Strike 4 - Nuclear Option, only if enabled)"
+    echo ""
+    echo -e "${YELLOW}NOTE: The watchdog now uses conservative socket kills instead of SIGUSR1,"
+    echo -e "which could kill the entire server for a single port issue.${NC}"
     echo ""
     read -p "Enable AUTO-RESTART of Snapserver if a stream is deadlocked for >6 minutes? (y/N): " enable_restart
     
@@ -523,10 +526,15 @@ manage_deadlock() {
     
     log_msg "ALERT: Port \$port has \$total_conns connections (Strike \$current_strikes -> \$new_strikes)."
     
-    # Escalation Logic
+    # Escalation Logic (Conservative approach - never kill the entire server for a single port issue)
+    # Strike 1: Kill connections
+    # Strike 2: Wait + Kill connections again (aggressive retry)
+    # Strike 3: Kill connections again
+    # Strike 4+: Service restart IF enabled, otherwise keep trying kills
+    
     if [ "\$new_strikes" -ge 4 ]; then
         # STRIKE 4: CRITICAL DEADLOCK (6+ mins)
-        log_msg "CRITICAL: Port \$port deadlocked for 6+ minutes. Actions failed."
+        log_msg "CRITICAL: Port \$port deadlocked for 6+ minutes. Socket kill attempts ineffective."
         
         if [ "\$ENABLE_AUTO_RESTART" == "true" ]; then
             log_msg "ACTION: NUCLEAR OPTION - Triggering Snapserver Service RESTART."
@@ -535,29 +543,25 @@ manage_deadlock() {
             set_strikes "\$port" "0" 
             return # Exit function, service is restarting anyway
         else
-            log_msg "ACTION: [BLOCKED] Would restart service, but AUTO-RESTART is disabled."
-            log_msg "ACTION: Killing connections again (Attempt to mitigate)."
+            log_msg "WARNING: AUTO-RESTART is disabled. Cannot restart service."
+            log_msg "ACTION: Aggressive socket kill attempt with delay..."
+            sleep 3
             kill_connections "\$port"
-            # Keep strikes at max to keep alerting? Or reset? 
-            # Resetting to 2 to retry Soft Reload loop seems safer to avoid spamming logs with 'Would restart'
+            # Reset to 2 to continue the kill retry loop
             set_strikes "\$port" "2"
+            log_msg "INFO: Strikes reset to 2. Will continue monitoring."
         fi
         
     elif [ "\$new_strikes" -eq 2 ]; then
-        # STRIKE 2: SOFT RELOAD (2 mins)
-        # Previous kill didn't work, app might be stuck. Try waking it up.
-        log_msg "WARNING: Persistent Issue on Port \$port. Killing connections failed."
-        log_msg "ACTION: Sending SIGUSR1 (Soft Reload) to Snapserver."
-        
-        # Find main PID accurately
-        local SNAP_PID=\$(pgrep -x snapserver | head -n1)
-        if [[ -n "\$SNAP_PID" ]]; then
-            kill -USR1 "\$SNAP_PID"
-            log_msg "DEBUG: Signal sent to PID \$SNAP_PID."
-        else
-            log_msg "ERROR: Could not find Snapserver PID."
-        fi
-        
+        # STRIKE 2: AGGRESSIVE RETRY (2 mins)
+        # Previous kill didn't immediately resolve. Wait a moment and try again.
+        # NOTE: We intentionally do NOT send SIGUSR1 as it kills the entire server
+        # instead of just reloading a single stream.
+        log_msg "WARNING: Persistent issue on Port \$port. First kill attempt didn't resolve."
+        log_msg "ACTION: Waiting 3 seconds, then aggressive socket kill retry..."
+        sleep 3
+        kill_connections "\$port"
+        log_msg "DEBUG: Second kill attempt completed for port \$port."
         set_strikes "\$port" "\$new_strikes"
 
     else
@@ -657,9 +661,9 @@ TIMER_EOF
     
     echo ""
     log_success "TCP Watchdog updated successfully!"
-    echo "  • Recovery Mode: Graduated (Kill -> USR1 -> Restart)"
+    echo "  • Recovery Mode: Conservative (Kill → Kill w/delay → Restart)"
     echo "  • Auto-Restart: $AUTO_RESTART"
-    echo "  • Logs: $LOG_FILE"
+    echo "  • Logs: /var/log/snapcast-tcp-watchdog.log"
     echo ""
 }
 
